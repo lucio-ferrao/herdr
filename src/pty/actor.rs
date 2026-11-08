@@ -1,3 +1,19 @@
+/// What the PTY tells about the program on it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PtyState {
+    /// Echo off while canonical (line) input stays on, as sudo, ssh and passwd read a password.
+    pub password_input: bool,
+    /// Name of the leader of the foreground process group, e.g. "vim", or the shell at its prompt.
+    pub foreground_process: Option<String>,
+}
+
+/// Reports changes of the PTY state. The PTY is read only while `watchers` is above zero, so panes nobody
+/// watches do not pay for it. Windows has no such state: ConPTY has no echo setting or foreground group.
+pub(crate) struct PtyStateObserver {
+    pub watchers: &'static std::sync::atomic::AtomicUsize,
+    pub on_change: Box<dyn FnMut(&PtyState) + Send + 'static>,
+}
+
 #[cfg(unix)]
 mod unix;
 
@@ -41,6 +57,8 @@ mod windows {
         pub initially_quiesced: bool,
         pub on_read: ReadCallback,
         pub on_reader_exit: Option<ReaderExitCallback>,
+        /// Unused on Windows: see [`super::PtyStateObserver`].
+        pub on_pty_state: Option<super::PtyStateObserver>,
     }
 
     enum PtyIoDataCommand {
@@ -209,6 +227,7 @@ mod windows {
                 initially_quiesced,
                 mut on_read,
                 on_reader_exit,
+                on_pty_state: _,
             } = config;
 
             let mut reader = master

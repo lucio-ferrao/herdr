@@ -491,6 +491,20 @@ pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJo
     })
 }
 
+/// Name of the leader of a process group, from a single process info read; control characters dropped.
+pub fn process_group_leader_name(process_group_id: u32) -> Option<String> {
+    let info = process_bsdinfo(process_group_id)?;
+    if info.pbi_pgid != process_group_id {
+        return None;
+    }
+    Some(
+        comm_from_bsdinfo(&info)?
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect(),
+    )
+}
+
 fn process_group_pids(process_group_id: u32) -> Vec<u32> {
     let mut capacity = 16usize;
 

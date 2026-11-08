@@ -361,6 +361,13 @@ impl App {
             tokens: terminal.metadata_tokens.values(),
             agent_session: terminal_agent_session_info(terminal),
             scroll: None,
+            input_mode: terminal
+                .password_input
+                .then_some(crate::api::schema::PaneInputMode::Password),
+            foreground_process: terminal.foreground_process.clone(),
+            screen: terminal
+                .alternate_screen
+                .then_some(crate::api::schema::PaneScreen::Alternate),
             revision: terminal.revision,
         })
     }

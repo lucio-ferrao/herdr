@@ -140,6 +140,14 @@ pub struct TerminalState {
     reported_resume: Option<crate::agent_resume::ReportedAgentResume>,
     reported_resume_revision: u64,
     pub terminal_title: Option<String>,
+    /// Runtime only, best effort: the program in the terminal is reading a password (echo off, line input
+    /// on).
+    pub password_input: bool,
+    /// Runtime only, best effort: the name of the leader of the foreground process group, e.g. "vim" or
+    /// the shell at its prompt.
+    pub foreground_process: Option<String>,
+    /// Runtime only: the program shows the alternate screen, as full-screen programs do.
+    pub alternate_screen: bool,
     pub manual_label: Option<String>,
     pub agent_name: Option<String>,
     agent_name_owner: Option<AgentNameOwner>,
@@ -180,6 +188,9 @@ impl TerminalState {
             reported_resume: None,
             reported_resume_revision: 0,
             terminal_title: None,
+            password_input: false,
+            foreground_process: None,
+            alternate_screen: false,
             manual_label: None,
             agent_name: None,
             agent_name_owner: None,
@@ -267,6 +278,26 @@ impl TerminalState {
         self.terminal_title
             .as_deref()
             .and_then(super::stripped_terminal_title)
+    }
+
+    /// Records what the terminal input looks like: password prompt, foreground program, alternate screen.
+    /// Returns whether anything changed.
+    pub(crate) fn set_input_state(
+        &mut self,
+        pty_state: crate::pty::actor::PtyState,
+        alternate_screen: bool,
+    ) -> bool {
+        if self.password_input == pty_state.password_input
+            && self.foreground_process == pty_state.foreground_process
+            && self.alternate_screen == alternate_screen
+        {
+            return false;
+        }
+        self.password_input = pty_state.password_input;
+        self.foreground_process = pty_state.foreground_process;
+        self.alternate_screen = alternate_screen;
+        self.revision = self.revision.wrapping_add(1);
+        true
     }
 
     pub(crate) fn set_terminal_title(&mut self, title: Option<String>) -> TerminalTitleChange {
@@ -2344,6 +2375,11 @@ impl TerminalState {
         self.agent_process_acquisition_pending = false;
         self.pending_agent_resume_plan = None;
         self.clear_agent_name();
+        // The new process starts without a password prompt, foreground program or alternate screen; the
+        // new runtime reports its own.
+        self.password_input = false;
+        self.foreground_process = None;
+        self.alternate_screen = false;
     }
 
     pub fn is_agent_terminal(&self) -> bool {
@@ -2479,6 +2515,24 @@ mod tests {
             agent: agent_label.into(),
             session_ref,
         });
+    }
+
+    #[test]
+    fn input_state_records_changes_and_clears_after_respawn() {
+        let mut terminal = TerminalState::new(TerminalId::alloc(), "/tmp".into());
+        let state = crate::pty::actor::PtyState {
+            password_input: true,
+            foreground_process: Some("sudo".into()),
+        };
+        assert!(terminal.set_input_state(state.clone(), true));
+        assert!(!terminal.set_input_state(state, true));
+        assert!(terminal.password_input && terminal.alternate_screen);
+
+        // A respawned process starts without the old one's prompt, program or screen.
+        terminal.clear_agent_runtime_identity_after_respawn();
+        assert!(!terminal.password_input);
+        assert_eq!(terminal.foreground_process, None);
+        assert!(!terminal.alternate_screen);
     }
 
     #[test]

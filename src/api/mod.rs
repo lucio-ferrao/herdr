@@ -10,6 +10,7 @@ pub use event_hub::EventHub;
 pub use server::ServerHandle;
 pub(crate) use server::{api_method_name, start_server_with_stop_control};
 pub use status::{read_runtime_status_at, RuntimeStatus};
+pub(crate) use subscriptions::PANE_UPDATE_WATCHERS;
 
 use std::path::PathBuf;
 

@@ -724,6 +724,14 @@ If no native session reference is stored, the field is omitted.
 
 `PaneInfo` and `AgentInfo` expose optional `terminal_title` and `terminal_title_stripped` fields. `terminal_title` is the latest OSC 0/2 title after safety normalization. `terminal_title_stripped` removes one recognized leading activity or spinner glyph and following whitespace. These server-owned values are ephemeral across a cold restart and are independent of the metadata `title` and semantic agent state.
 
+`PaneInfo` exposes three optional fields about the program in the pane. They are best effort, kept current while a client subscribes to `pane.updated`, and each change emits `pane.updated`:
+
+- `input_mode` is `"password"` while the program reads a password with terminal echo off and line (canonical) input on, as `sudo`, `ssh` and `passwd` do locally. A password read on a remote host through `ssh`, `mosh` or a nested `tmux`, or by a full-screen program with its own prompt, is not seen. Clients can use it to keep the input private, for example a phone keyboard without suggestions or learning, but should not rely on it alone.
+- `foreground_process` is the name of the leader of the foreground process group of the pane terminal, for example `"vim"`, or the shell (`"bash"`) at its prompt. In a pipeline such as `git log | less` it is the first program, `"git"`. It is read once the terminal settles after activity and sent to every `pane.updated` subscriber, without asking for `pane.process_info`.
+- `screen` is `"alternate"` while the program shows the alternate screen, as full-screen editors, pagers and monitors do, so clients can tell them from a command line: a shell at its prompt turns echo and line input off as well, so the terminal modes cannot tell them apart.
+
+Each field is absent when it does not apply or is unknown.
+
 Use `pane.report_metadata` when a user hook wants to customize presentation without taking over lifecycle state from a Herdr integration.
 
 ```json

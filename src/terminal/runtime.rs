@@ -376,6 +376,10 @@ impl TerminalRuntime {
         self.0.terminal_title()
     }
 
+    pub fn pty_state(&self) -> crate::pty::actor::PtyState {
+        self.0.pty_state()
+    }
+
     pub fn agent_osc_title(&self) -> String {
         self.0.agent_osc_title()
     }
@@ -659,6 +663,10 @@ impl TerminalRuntime {
 
     pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) -> Vec<Bytes> {
         self.0.test_process_pty_bytes(bytes)
+    }
+
+    pub(crate) fn test_set_pty_state(&self, state: crate::pty::actor::PtyState) {
+        self.0.test_set_pty_state(state);
     }
 
     pub(crate) fn test_with_scrollback_bytes(

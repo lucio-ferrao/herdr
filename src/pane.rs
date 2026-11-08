@@ -1508,6 +1508,8 @@ pub struct PaneRuntime {
     cwd_process_exited: Arc<AtomicBool>,
     child_wait_completed: Option<Arc<AtomicBool>>,
     kitty_keyboard_flags: Arc<AtomicU16>,
+    /// What the PTY actor last reported about the program on the PTY: password prompt, foreground program.
+    pty_state: Arc<Mutex<crate::pty::actor::PtyState>>,
     content_seq: Arc<AtomicU64>,
     content_write_lock: Arc<Mutex<()>>,
     detection_content_seq: Arc<AtomicU64>,
@@ -2206,6 +2208,27 @@ fn publish_terminal_bells(pane_id: PaneId, count: u16, events: &mpsc::Sender<App
     }
 }
 
+/// Keeps what the PTY tells about the pane's program and wakes the app so it publishes the change, through
+/// the same coalesced path as terminal titles. The PTY is read only while clients watch pane updates.
+fn pty_state_observer(
+    pane_id: PaneId,
+    pty_state: Arc<Mutex<crate::pty::actor::PtyState>>,
+    render_dirty: Arc<RenderSignal>,
+    render_notify: Arc<Notify>,
+) -> crate::pty::actor::PtyStateObserver {
+    crate::pty::actor::PtyStateObserver {
+        watchers: &crate::api::PANE_UPDATE_WATCHERS,
+        on_change: Box::new(move |state| {
+            *pty_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = state.clone();
+            if render_dirty.request_terminal_title(pane_id) {
+                render_notify.notify_one();
+            }
+        }),
+    }
+}
+
 fn publish_reported_cwd(
     pane_id: PaneId,
     cwd: std::path::PathBuf,
@@ -2560,10 +2583,17 @@ impl PaneRuntime {
         let reported_cwd = Arc::new(Mutex::new(None));
         let cwd_process_exited = Arc::new(AtomicBool::new(false));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(keyboard_protocol_flags));
+        let pty_state = Arc::new(Mutex::new(crate::pty::actor::PtyState::default()));
         let content_seq = Arc::new(AtomicU64::new(0));
         let content_write_lock = Arc::new(Mutex::new(()));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
 
+        let on_pty_state = pty_state_observer(
+            pane_id,
+            pty_state.clone(),
+            render_dirty.clone(),
+            render_notify.clone(),
+        );
         let io = {
             let terminal = terminal.clone();
             let response_writer = response_tx.clone();
@@ -2592,8 +2622,10 @@ impl PaneRuntime {
                 compression_wake.wake();
                 publish_terminal_bells(pane_id, result.terminal_bells, &read_events);
                 observe_detection_content_change(bytes, &detection_content_seq);
-                let title_requested =
-                    result.terminal_title_changed && render_dirty.request_terminal_title(pane_id);
+                // Switching to or from the alternate screen is pane metadata published with the title.
+                let title_requested = (result.terminal_title_changed
+                    || result.alternate_screen_changed)
+                    && render_dirty.request_terminal_title(pane_id);
                 let render_requested = result.request_render && render_dirty.request_pty(pane_id);
                 if title_requested || render_requested {
                     render_notify.notify_one();
@@ -2642,6 +2674,7 @@ impl PaneRuntime {
                 initially_quiesced: true,
                 on_read,
                 on_reader_exit: Some(on_reader_exit),
+                on_pty_state: Some(on_pty_state),
             })?)
         };
 
@@ -2669,6 +2702,7 @@ impl PaneRuntime {
             cwd_process_exited,
             child_wait_completed: None,
             kitty_keyboard_flags,
+            pty_state,
             content_seq,
             content_write_lock,
             detection_content_seq,
@@ -2721,6 +2755,7 @@ impl PaneRuntime {
         let terminal = Arc::new(PaneTerminal::new(pane_terminal));
         let compression = TerminalCompressionTask::spawn(pane_id, terminal.clone());
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(0));
+        let pty_state = Arc::new(Mutex::new(crate::pty::actor::PtyState::default()));
         let content_write_lock = Arc::new(Mutex::new(()));
 
         let spawned = crate::pty::backend::spawn_with_portable_pty(rows, cols, cmd)
@@ -2768,6 +2803,12 @@ impl PaneRuntime {
             });
         }
 
+        let on_pty_state = pty_state_observer(
+            pane_id,
+            pty_state.clone(),
+            render_dirty.clone(),
+            render_notify.clone(),
+        );
         let io = {
             let terminal = terminal.clone();
             let response_writer = response_tx.clone();
@@ -2797,8 +2838,10 @@ impl PaneRuntime {
                 if agent_detection == AgentDetection::Enabled {
                     observe_detection_content_change(bytes, &detection_content_seq);
                 }
-                let title_requested =
-                    result.terminal_title_changed && render_dirty.request_terminal_title(pane_id);
+                // Switching to or from the alternate screen is pane metadata published with the title.
+                let title_requested = (result.terminal_title_changed
+                    || result.alternate_screen_changed)
+                    && render_dirty.request_terminal_title(pane_id);
                 let render_requested = result.request_render && render_dirty.request_pty(pane_id);
                 if title_requested || render_requested {
                     render_notify.notify_one();
@@ -2838,6 +2881,7 @@ impl PaneRuntime {
                 initially_quiesced: false,
                 on_read,
                 on_reader_exit: None,
+                on_pty_state: Some(on_pty_state),
             })?)
         };
 
@@ -3282,6 +3326,7 @@ impl PaneRuntime {
             cwd_process_exited: child_wait_completed.clone(),
             child_wait_completed: Some(child_wait_completed),
             kitty_keyboard_flags,
+            pty_state,
             content_seq,
             content_write_lock,
             detection_content_seq,
@@ -3532,6 +3577,14 @@ impl PaneRuntime {
 
     pub fn terminal_title(&self) -> Option<String> {
         self.terminal.terminal_title()
+    }
+
+    /// What the PTY last told about the pane's program, while clients watch pane updates.
+    pub fn pty_state(&self) -> crate::pty::actor::PtyState {
+        self.pty_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub fn agent_osc_title(&self) -> String {
@@ -4019,6 +4072,13 @@ impl PaneRuntime {
         (release_tx, writer)
     }
 
+    pub(crate) fn test_set_pty_state(&self, state: crate::pty::actor::PtyState) {
+        *self
+            .pty_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = state;
+    }
+
     pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) -> Vec<Bytes> {
         let _content_write_guard = match self.content_write_lock.lock() {
             Ok(guard) => guard,
@@ -4076,6 +4136,7 @@ impl PaneRuntime {
                 cwd_process_exited: Arc::new(AtomicBool::new(false)),
                 child_wait_completed: None,
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+                pty_state: Arc::new(Mutex::new(crate::pty::actor::PtyState::default())),
                 content_seq: Arc::new(AtomicU64::new(0)),
                 content_write_lock: Arc::new(Mutex::new(())),
                 detection_content_seq: Arc::new(AtomicU64::new(0)),
@@ -5429,6 +5490,7 @@ mod tests {
             reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+            pty_state: Arc::new(Mutex::new(crate::pty::actor::PtyState::default())),
             content_seq: Arc::new(AtomicU64::new(0)),
             content_write_lock: Arc::new(Mutex::new(())),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
@@ -5469,6 +5531,7 @@ mod tests {
             reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+            pty_state: Arc::new(Mutex::new(crate::pty::actor::PtyState::default())),
             content_seq: Arc::new(AtomicU64::new(0)),
             content_write_lock: Arc::new(Mutex::new(())),
             detection_content_seq: Arc::new(AtomicU64::new(0)),

@@ -52,19 +52,28 @@ impl App {
             let Some(runtime) = self.terminal_runtimes.get(&terminal_id) else {
                 continue;
             };
-            observations.push((ws_idx, *pane_id, terminal_id, runtime.terminal_title()));
+            observations.push((
+                ws_idx,
+                *pane_id,
+                terminal_id,
+                runtime.terminal_title(),
+                runtime.pty_state(),
+                runtime.alternate_screen_active(),
+            ));
         }
 
         let mut changes = TerminalTitleChanges::default();
         let mut publish = Vec::new();
-        for (ws_idx, pane_id, terminal_id, title) in observations {
+        for (ws_idx, pane_id, terminal_id, title, pty_state, alternate_screen) in observations {
             let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
                 continue;
             };
             let change = terminal.set_terminal_title(title);
             changes.raw_changed |= change.raw_changed;
             changes.stripped_changed |= change.stripped_changed;
-            if change.stripped_changed {
+            // The input state rides the terminal-title wake: both are terminal metadata seen after output.
+            let input_changed = terminal.set_input_state(pty_state, alternate_screen);
+            if change.stripped_changed || input_changed {
                 publish.push((ws_idx, pane_id));
             }
         }
@@ -161,6 +170,83 @@ mod tests {
         assert_eq!(pane.terminal_title_stripped, None);
         assert_eq!(pane.revision, 3);
         assert_eq!(pane_updated_events(&event_hub), 3);
+    }
+
+    /// An app with one pane on a test runtime showing `screen_bytes`, and that pane as a sync source.
+    fn app_with_test_pane(
+        event_hub: &crate::api::EventHub,
+        screen_bytes: &[u8],
+    ) -> (App, PaneId, crate::terminal::TerminalId, HashSet<PaneId>) {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .unwrap()
+            .clone();
+        let runtime =
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, screen_bytes);
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        (app, pane_id, terminal_id, HashSet::from([pane_id]))
+    }
+
+    #[tokio::test]
+    async fn sync_publishes_pty_state_changes_in_pane_info() {
+        let event_hub = crate::api::EventHub::default();
+        let (mut app, pane_id, terminal_id, sources) = app_with_test_pane(&event_hub, b"");
+
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .test_set_pty_state(crate::pty::actor::PtyState {
+                password_input: true,
+                foreground_process: Some("sudo".into()),
+            });
+        app.sync_terminal_titles(&sources);
+        let pane = app.pane_info(0, pane_id).unwrap();
+        assert_eq!(
+            pane.input_mode,
+            Some(crate::api::schema::PaneInputMode::Password)
+        );
+        assert_eq!(pane.foreground_process.as_deref(), Some("sudo"));
+        assert_eq!(pane_updated_events(&event_hub), 1);
+
+        // Unchanged: nothing published.
+        app.sync_terminal_titles(&sources);
+        assert_eq!(pane_updated_events(&event_hub), 1);
+
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .test_set_pty_state(crate::pty::actor::PtyState::default());
+        app.sync_terminal_titles(&sources);
+        let pane = app.pane_info(0, pane_id).unwrap();
+        assert_eq!(pane.input_mode, None);
+        assert_eq!(pane.foreground_process, None);
+        assert_eq!(pane_updated_events(&event_hub), 2);
+    }
+
+    #[tokio::test]
+    async fn sync_publishes_the_alternate_screen_in_pane_info() {
+        let event_hub = crate::api::EventHub::default();
+        let (mut app, pane_id, _terminal_id, sources) =
+            app_with_test_pane(&event_hub, b"\x1b[?1049h");
+
+        app.sync_terminal_titles(&sources);
+        assert_eq!(
+            app.pane_info(0, pane_id).unwrap().screen,
+            Some(crate::api::schema::PaneScreen::Alternate)
+        );
+        assert_eq!(pane_updated_events(&event_hub), 1);
     }
 
     #[tokio::test]

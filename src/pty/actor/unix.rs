@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     io::{Read, Write},
     os::fd::{AsRawFd, OwnedFd, RawFd},
-    sync::{mpsc as std_mpsc, Arc, Mutex},
+    sync::{atomic::Ordering, mpsc as std_mpsc, Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -10,6 +10,7 @@ use bytes::Bytes;
 use tokio::sync::mpsc::{self, error::TryRecvError as DataTryRecvError};
 use tracing::{debug, warn};
 
+use super::{PtyState, PtyStateObserver};
 use crate::pty::fd;
 
 // Actor handle methods must call wake_actor() after queuing work. The idle
@@ -18,6 +19,12 @@ use crate::pty::fd;
 const ACTOR_IDLE_POLL_MS: i32 = 1000;
 const ACTOR_COMMAND_BUFFER: usize = 1024;
 const HANDOFF_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+// A program can change the PTY echo, or hand the terminal to another process group, without writing
+// anything, so the PTY state is read again this long after the last output or input, once. The foreground
+// program is read only then, when it has settled.
+const PTY_STATE_RECHECK: Duration = Duration::from_millis(150);
+// During a burst of output the echo setting is read at most this often; the recheck covers the end.
+const PTY_STATE_READ_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActorState {
@@ -69,6 +76,9 @@ pub(crate) struct PtyIoActorConfig {
     pub initially_quiesced: bool,
     pub on_read: ReadCallback,
     pub on_reader_exit: Option<ReaderExitCallback>,
+    /// Told when the program on the PTY starts or stops reading a password, or another program comes to
+    /// the foreground, e.g. a shell starting vim.
+    pub on_pty_state: Option<PtyStateObserver>,
 }
 
 enum PtyIoDataCommand {
@@ -428,6 +438,11 @@ impl PtyIoActor {
             response_order,
             on_read: config.on_read,
             on_reader_exit: config.on_reader_exit,
+            pty_state_observer: config.on_pty_state,
+            pty_state_watched: false,
+            pty_state: None,
+            pty_state_read_at: None,
+            pty_state_recheck_at: None,
             poll_observer,
         };
         std::thread::Builder::new()
@@ -462,6 +477,12 @@ struct PtyIoActorRunner {
     response_order: Arc<Mutex<()>>,
     on_read: ReadCallback,
     on_reader_exit: Option<ReaderExitCallback>,
+    pty_state_observer: Option<PtyStateObserver>,
+    pty_state_watched: bool,
+    /// The state last reported; None until the first report, which is always made.
+    pty_state: Option<PtyState>,
+    pty_state_read_at: Option<Instant>,
+    pty_state_recheck_at: Option<Instant>,
     poll_observer: Option<std_mpsc::Sender<()>>,
 }
 
@@ -518,6 +539,7 @@ impl PtyIoActorRunner {
             }
 
             self.apply_pending_controls();
+            self.track_pty_state_watchers();
 
             if !self.pending_writes.is_empty() {
                 match self.flush_pending_writes_once() {
@@ -528,8 +550,10 @@ impl PtyIoActorRunner {
                         break;
                     }
                 }
+                self.after_pty_activity(false);
             }
             self.schedule_submission_enter();
+            self.recheck_pty_state_when_due();
             if self.active_submission.is_none() && self.pending_handoff.is_some() {
                 continue;
             }
@@ -568,6 +592,7 @@ impl PtyIoActorRunner {
                                 break;
                             }
                         }
+                        self.after_pty_activity(false);
                     }
                 }
                 Err(err) => {
@@ -578,6 +603,10 @@ impl PtyIoActorRunner {
         }
 
         self.close_input_queue();
+        // A closed PTY has no password prompt and no foreground program any more.
+        if self.pty_state.is_some() {
+            self.report_pty_state(PtyState::default());
+        }
         if let Some(on_reader_exit) = self.on_reader_exit.take() {
             on_reader_exit();
         }
@@ -850,6 +879,7 @@ impl PtyIoActorRunner {
                         .terminal_responses,
                 );
                 self.enqueue_terminal_responses(terminal_responses);
+                self.after_pty_activity(true);
                 true
             }
         }
@@ -905,10 +935,17 @@ impl PtyIoActorRunner {
     }
 
     fn poll_timeout_ms(&self) -> i32 {
-        let Some(ActiveSubmission {
-            phase: SubmissionPhase::WaitingUntil(deadline),
-            ..
-        }) = self.active_submission.as_ref()
+        let submission_deadline = match self.active_submission.as_ref() {
+            Some(ActiveSubmission {
+                phase: SubmissionPhase::WaitingUntil(deadline),
+                ..
+            }) => Some(*deadline),
+            _ => None,
+        };
+        let Some(deadline) = [submission_deadline, self.pty_state_recheck_at]
+            .into_iter()
+            .flatten()
+            .min()
         else {
             return ACTOR_IDLE_POLL_MS;
         };
@@ -917,6 +954,78 @@ impl PtyIoActorRunner {
             .as_millis()
             .max(1)
             .min(ACTOR_IDLE_POLL_MS as u128) as i32
+    }
+
+    /// Follows whether anyone watches the PTY state; when the first watcher comes, the state is read at once.
+    fn track_pty_state_watchers(&mut self) {
+        let watched = self
+            .pty_state_observer
+            .as_ref()
+            .is_some_and(|observer| observer.watchers.load(Ordering::Relaxed) > 0);
+        if watched && !self.pty_state_watched {
+            self.pty_state_recheck_at = Some(Instant::now());
+        }
+        self.pty_state_watched = watched;
+    }
+
+    /// After output or input, while watched: output may be a password prompt, so the echo setting is read
+    /// (at most every PTY_STATE_READ_INTERVAL), and the whole state again once the PTY settles.
+    fn after_pty_activity(&mut self, output: bool) {
+        if !self.pty_state_watched {
+            return;
+        }
+        let now = Instant::now();
+        let read_due = self
+            .pty_state_read_at
+            .is_none_or(|at| now.duration_since(at) >= PTY_STATE_READ_INTERVAL);
+        if output && read_due {
+            self.pty_state_read_at = Some(now);
+            let mut state = self.pty_state.clone().unwrap_or_default();
+            state.password_input = self.read_password_input(state.password_input);
+            self.report_pty_state(state);
+        }
+        self.pty_state_recheck_at = Some(now + PTY_STATE_RECHECK);
+    }
+
+    fn recheck_pty_state_when_due(&mut self) {
+        if !self
+            .pty_state_recheck_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return;
+        }
+        self.pty_state_recheck_at = None;
+        if !self.pty_state_watched {
+            return;
+        }
+        let previous = self.pty_state.clone().unwrap_or_default();
+        // A failed read keeps the last value, as for the echo setting: EIO and ENOTTY come and go while the
+        // PTY changes hands. The name is read every time, so a leader that execs another program shows up.
+        let foreground_process =
+            match crate::platform::foreground_process_group_id_for_tty_fd(self.file.as_raw_fd()) {
+                Some(group) => crate::platform::process_group_leader_name(group),
+                None => previous.foreground_process,
+            };
+        let state = PtyState {
+            password_input: self.read_password_input(previous.password_input),
+            foreground_process,
+        };
+        self.report_pty_state(state);
+    }
+
+    fn read_password_input(&self, previous: bool) -> bool {
+        fd::password_input_active(self.file.as_raw_fd()).unwrap_or(previous)
+    }
+
+    /// Reports the state when it differs from the last one reported, and always the first time.
+    fn report_pty_state(&mut self, state: PtyState) {
+        if self.pty_state.as_ref() == Some(&state) {
+            return;
+        }
+        if let Some(observer) = self.pty_state_observer.as_mut() {
+            (observer.on_change)(&state);
+        }
+        self.pty_state = Some(state);
     }
 
     fn fail_active_submission(&mut self, err: std::io::Error) {
@@ -1084,6 +1193,7 @@ mod tests {
                 PtyReadResult::empty()
             }),
             on_reader_exit: None,
+            on_pty_state: None,
         };
         let handle = if let Some(poll_observer) = poll_observer {
             PtyIoActor::spawn_with_poll_observer(config, poll_observer)
@@ -1118,6 +1228,11 @@ mod tests {
             response_order: Arc::new(Mutex::new(())),
             on_read: Box::new(|_| PtyReadResult::empty()),
             on_reader_exit: None,
+            pty_state_observer: None,
+            pty_state_watched: false,
+            pty_state: None,
+            pty_state_read_at: None,
+            pty_state_recheck_at: None,
             poll_observer: None,
         };
         (runner, peer)
@@ -1348,6 +1463,7 @@ mod tests {
                     attempt_tx.send(attempt).expect("attempt receiver alive");
                 }
             })),
+            on_pty_state: None,
         };
         let handle = PtyIoActor::spawn(config).expect("actor spawn");
         *handle_slot
@@ -1429,6 +1545,7 @@ mod tests {
                 PtyReadResult::empty()
             }),
             on_reader_exit: None,
+            on_pty_state: None,
         })
         .expect("actor spawn");
 
@@ -1543,6 +1660,164 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("actor read callback");
         assert_eq!(read, Bytes::from_static(b"from-peer"));
+        handle.shutdown();
+    }
+
+    /// Watchers of the PTY state in tests: one, or none.
+    static WATCHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    static UNWATCHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// An actor on a test PTY telling each read and each reported PTY state.
+    fn actor_with_pty_state_listener(
+        watchers: &'static std::sync::atomic::AtomicUsize,
+    ) -> (
+        PtyIoActorHandle,
+        OwnedFd,
+        std_mpsc::Receiver<()>,
+        std_mpsc::Receiver<PtyState>,
+    ) {
+        let (master, slave) = crate::pty::fd::pty_test_support::open_test_pty();
+        let (read_tx, read_rx) = std_mpsc::channel();
+        let (state_tx, state_rx) = std_mpsc::channel();
+        let handle = PtyIoActor::spawn(PtyIoActorConfig {
+            pane_id: 1,
+            master_fd: master,
+            initially_quiesced: false,
+            on_read: Box::new(move |_| {
+                let _ = read_tx.send(());
+                PtyReadResult::empty()
+            }),
+            on_reader_exit: None,
+            on_pty_state: Some(PtyStateObserver {
+                watchers,
+                on_change: Box::new(move |state| {
+                    let _ = state_tx.send(state.clone());
+                }),
+            }),
+        })
+        .expect("actor spawn");
+        (handle, slave, read_rx, state_rx)
+    }
+
+    fn write_program_output(slave: &OwnedFd, bytes: &[u8]) {
+        let written = unsafe { libc::write(slave.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+        assert_eq!(written, bytes.len() as isize);
+    }
+
+    /// The next reported state that satisfies `wanted`, skipping the others.
+    fn wait_for_state(
+        state_rx: &std_mpsc::Receiver<PtyState>,
+        wanted: impl Fn(&PtyState) -> bool,
+    ) -> PtyState {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let state = state_rx.recv_timeout(left).expect("PTY state report");
+            if wanted(&state) {
+                return state;
+            }
+        }
+    }
+
+    /// Spawns `script` in sh as the leader of the foreground process group of the PTY.
+    fn spawn_foreground_program(slave: &OwnedFd, script: &str) -> std::process::Child {
+        let slave_fd = slave.as_raw_fd();
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", script])
+            .stdin(std::process::Stdio::from(
+                slave.try_clone().expect("dup slave"),
+            ))
+            .stdout(std::process::Stdio::from(
+                slave.try_clone().expect("dup slave"),
+            ))
+            .stderr(std::process::Stdio::null());
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut command, move || {
+                if libc::setsid() < 0 || libc::ioctl(slave_fd, libc::TIOCSCTTY, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        command.spawn().expect("spawn program on the PTY")
+    }
+
+    #[test]
+    fn actor_reports_password_prompt_and_its_end() {
+        let (handle, slave, _read_rx, state_rx) = actor_with_pty_state_listener(&WATCHED);
+
+        crate::pty::fd::pty_test_support::set_local_flags(slave.as_raw_fd(), false, true);
+        write_program_output(&slave, b"[sudo] password: ");
+        wait_for_state(&state_rx, |state| state.password_input);
+
+        crate::pty::fd::pty_test_support::set_local_flags(slave.as_raw_fd(), true, true);
+        write_program_output(&slave, b"\r\n");
+        wait_for_state(&state_rx, |state| !state.password_input);
+        handle.shutdown();
+    }
+
+    #[test]
+    fn actor_rechecks_password_input_after_output_without_more_output() {
+        let (handle, slave, read_rx, state_rx) = actor_with_pty_state_listener(&WATCHED);
+
+        // The prompt is read, and its state reported, before the echo goes off: only the recheck can see it.
+        write_program_output(&slave, b"$ ");
+        read_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("prompt read");
+        let first = wait_for_state(&state_rx, |_| true);
+        assert!(!first.password_input);
+        crate::pty::fd::pty_test_support::set_local_flags(slave.as_raw_fd(), false, true);
+        wait_for_state(&state_rx, |state| state.password_input);
+        handle.shutdown();
+    }
+
+    #[test]
+    fn actor_reads_nothing_while_nobody_watches() {
+        let (handle, slave, read_rx, state_rx) = actor_with_pty_state_listener(&UNWATCHED);
+
+        crate::pty::fd::pty_test_support::set_local_flags(slave.as_raw_fd(), false, true);
+        write_program_output(&slave, b"[sudo] password: ");
+        read_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("output read");
+        assert!(state_rx.recv_timeout(PTY_STATE_RECHECK * 3).is_err());
+        handle.shutdown();
+    }
+
+    #[test]
+    fn actor_reports_the_foreground_program_and_a_program_it_execs() {
+        let (handle, slave, _read_rx, state_rx) = actor_with_pty_state_listener(&WATCHED);
+
+        // The leader of the foreground group execs another program: same group, new name.
+        let mut child = spawn_foreground_program(
+            &slave,
+            "printf ready; sleep 0.5; exec awk 'BEGIN { printf \"go\"; system(\"sleep 5\") }'",
+        );
+        wait_for_state(&state_rx, |state| {
+            state.foreground_process.as_deref() == Some("sh")
+        });
+        wait_for_state(&state_rx, |state| {
+            state.foreground_process.as_deref() == Some("awk")
+        });
+        let _ = child.kill();
+        let _ = child.wait();
+        handle.shutdown();
+    }
+
+    #[test]
+    fn actor_reports_an_empty_state_when_the_pty_closes() {
+        let (handle, slave, _read_rx, state_rx) = actor_with_pty_state_listener(&WATCHED);
+
+        crate::pty::fd::pty_test_support::set_local_flags(slave.as_raw_fd(), false, true);
+        write_program_output(&slave, b"[sudo] password: ");
+        wait_for_state(&state_rx, |state| state.password_input);
+        drop(slave);
+        assert_eq!(
+            wait_for_state(&state_rx, |state| !state.password_input),
+            PtyState::default()
+        );
         handle.shutdown();
     }
 
@@ -1720,6 +1995,11 @@ mod tests {
                 }],
             }),
             on_reader_exit: None,
+            pty_state_observer: None,
+            pty_state_watched: false,
+            pty_state: None,
+            pty_state_read_at: None,
+            pty_state_recheck_at: None,
             poll_observer: None,
         };
         let handle = PtyIoActorHandle {
@@ -1851,6 +2131,11 @@ mod tests {
             response_order: Arc::new(Mutex::new(())),
             on_read: Box::new(|_| PtyReadResult::empty()),
             on_reader_exit: None,
+            pty_state_observer: None,
+            pty_state_watched: false,
+            pty_state: None,
+            pty_state_read_at: None,
+            pty_state_recheck_at: None,
             poll_observer: None,
         };
 

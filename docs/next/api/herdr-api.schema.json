@@ -799,6 +799,24 @@
                 "null"
               ]
             },
+            "foreground_process": {
+              "description": "Best effort: name of the leader of the foreground process group of the pane terminal, e.g. \"vim\", or\nthe shell at its prompt. In a pipeline such as `git log | less` it is the first program, here \"git\".\nSent to every pane.updated subscriber when it changes, once the terminal settles. Kept current while a\nclient subscribes to pane.updated. Absent when unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "input_mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/PaneInputMode"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Best effort: set while the program in the pane reads a password with terminal echo off and line input\non, so clients can keep the input private, for example a phone keyboard without suggestions or\nlearning. Only prompts on the pane's own terminal are seen: a password read on a remote host through\nssh, mosh or a nested tmux, or by a full-screen program with its own prompt, is not. Kept current while\na client subscribes to pane.updated; each change emits pane.updated. Absent otherwise."
+            },
             "label": {
               "type": [
                 "string",
@@ -818,6 +836,17 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "screen": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/PaneScreen"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Set while the program in the pane shows the alternate screen, as full-screen programs (editors, pagers,\nmonitors) do; clients can tell them from a command line this way. Each change emits pane.updated.\nAbsent otherwise."
             },
             "scroll": {
               "anyOf": [
@@ -883,6 +912,16 @@
             "revision"
           ],
           "type": "object"
+        },
+        "PaneInputMode": {
+          "oneOf": [
+            {
+              "enum": [
+                "password"
+              ],
+              "type": "string"
+            }
+          ]
         },
         "PaneLayoutPane": {
           "properties": {
@@ -1002,6 +1041,16 @@
             "rect"
           ],
           "type": "object"
+        },
+        "PaneScreen": {
+          "oneOf": [
+            {
+              "enum": [
+                "alternate"
+              ],
+              "type": "string"
+            }
+          ]
         },
         "PaneScrollInfo": {
           "properties": {
@@ -7907,6 +7956,24 @@
                 "null"
               ]
             },
+            "foreground_process": {
+              "description": "Best effort: name of the leader of the foreground process group of the pane terminal, e.g. \"vim\", or\nthe shell at its prompt. In a pipeline such as `git log | less` it is the first program, here \"git\".\nSent to every pane.updated subscriber when it changes, once the terminal settles. Kept current while a\nclient subscribes to pane.updated. Absent when unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "input_mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/PaneInputMode"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Best effort: set while the program in the pane reads a password with terminal echo off and line input\non, so clients can keep the input private, for example a phone keyboard without suggestions or\nlearning. Only prompts on the pane's own terminal are seen: a password read on a remote host through\nssh, mosh or a nested tmux, or by a full-screen program with its own prompt, is not. Kept current while\na client subscribes to pane.updated; each change emits pane.updated. Absent otherwise."
+            },
             "label": {
               "type": [
                 "string",
@@ -7926,6 +7993,17 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "screen": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/PaneScreen"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Set while the program in the pane shows the alternate screen, as full-screen programs (editors, pagers,\nmonitors) do; clients can tell them from a command line this way. Each change emits pane.updated.\nAbsent otherwise."
             },
             "scroll": {
               "anyOf": [
@@ -7991,6 +8069,16 @@
             "revision"
           ],
           "type": "object"
+        },
+        "PaneInputMode": {
+          "oneOf": [
+            {
+              "enum": [
+                "password"
+              ],
+              "type": "string"
+            }
+          ]
         },
         "PaneLayoutPane": {
           "properties": {
@@ -8421,6 +8509,16 @@
             "layout"
           ],
           "type": "object"
+        },
+        "PaneScreen": {
+          "oneOf": [
+            {
+              "enum": [
+                "alternate"
+              ],
+              "type": "string"
+            }
+          ]
         },
         "PaneScrollInfo": {
           "properties": {

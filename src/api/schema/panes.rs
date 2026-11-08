@@ -530,7 +530,45 @@ pub struct PaneInfo {
     pub agent_session: Option<AgentSessionInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll: Option<PaneScrollInfo>,
+    /// Best effort: set while the program in the pane reads a password with terminal echo off and line input
+    /// on, so clients can keep the input private, for example a phone keyboard without suggestions or
+    /// learning. Only prompts on the pane's own terminal are seen: a password read on a remote host through
+    /// ssh, mosh or a nested tmux, or by a full-screen program with its own prompt, is not. Kept current while
+    /// a client subscribes to pane.updated; each change emits pane.updated. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_mode: Option<PaneInputMode>,
+    /// Best effort: name of the leader of the foreground process group of the pane terminal, e.g. "vim", or
+    /// the shell at its prompt. In a pipeline such as `git log | less` it is the first program, here "git".
+    /// Sent to every pane.updated subscriber when it changes, once the terminal settles. Kept current while a
+    /// client subscribes to pane.updated. Absent when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_process: Option<String>,
+    /// Set while the program in the pane shows the alternate screen, as full-screen programs (editors, pagers,
+    /// monitors) do; clients can tell them from a command line this way. Each change emits pane.updated.
+    /// Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen: Option<PaneScreen>,
     pub revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneInputMode {
+    Password,
+    /// A mode this client does not know, from a newer server. Never sent.
+    #[serde(other)]
+    #[schemars(skip)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneScreen {
+    Alternate,
+    /// A screen this client does not know, from a newer server. Never sent.
+    #[serde(other)]
+    #[schemars(skip)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

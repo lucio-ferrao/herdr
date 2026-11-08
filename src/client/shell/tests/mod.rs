@@ -199,6 +199,9 @@ fn pane_scroll_result(
                 max_offset_from_bottom,
                 viewport_rows,
             }),
+            input_mode: None,
+            foreground_process: None,
+            screen: None,
             revision: 0,
         },
     }

@@ -95,6 +95,28 @@ impl PanePresentationSnapshot {
 pub(super) struct ActiveEventSubscription {
     event_kind: crate::api::schema::EventKind,
     last_sequence: u64,
+    /// Held by pane.updated subscriptions, which want the terminal input state of the panes.
+    _pane_update_watch: Option<PaneUpdateWatch>,
+}
+
+/// Clients subscribed to pane.updated. Pane PTYs read their input state (password prompt, foreground
+/// program) only while there is at least one, so panes nobody watches do not pay for it.
+pub(crate) static PANE_UPDATE_WATCHERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+struct PaneUpdateWatch;
+
+impl PaneUpdateWatch {
+    fn new() -> Self {
+        PANE_UPDATE_WATCHERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for PaneUpdateWatch {
+    fn drop(&mut self) {
+        PANE_UPDATE_WATCHERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 pub(super) enum ActiveSubscription {
@@ -117,6 +139,8 @@ impl ActiveSubscription {
             Self::Event(ActiveEventSubscription {
                 event_kind,
                 last_sequence: event_start_sequence,
+                _pane_update_watch: (event_kind == EventKind::PaneUpdated)
+                    .then(PaneUpdateWatch::new),
             })
         };
 
@@ -713,6 +737,9 @@ mod tests {
             tokens: HashMap::new(),
             agent_session: None,
             scroll,
+            input_mode: None,
+            foreground_process: None,
+            screen: None,
             revision: 0,
         }
     }

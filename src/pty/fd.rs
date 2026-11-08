@@ -5,6 +5,23 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Whether the program on the PTY is reading a password: echo off while canonical (line) input stays on,
+/// as sudo, ssh and passwd do. Full-screen programs turn both off and do not count. None if the PTY
+/// settings cannot be read.
+#[cfg(unix)]
+pub(crate) fn password_input_active(fd: RawFd) -> Option<bool> {
+    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(fd, &mut termios) } != 0 {
+        return None;
+    }
+    Some(is_password_input(termios.c_lflag))
+}
+
+#[cfg(unix)]
+pub(crate) fn is_password_input(lflag: libc::tcflag_t) -> bool {
+    lflag & libc::ECHO == 0 && lflag & libc::ICANON != 0
+}
+
 #[cfg(unix)]
 pub(crate) fn duplicate_fd(fd: RawFd) -> std::io::Result<RawFd> {
     let duplicated = unsafe { libc::dup(fd) };
@@ -238,4 +255,64 @@ pub(crate) fn resize_pty_fd(
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+pub(crate) mod pty_test_support {
+    use super::*;
+
+    pub(crate) fn open_test_pty() -> (OwnedFd, OwnedFd) {
+        let mut master: libc::c_int = -1;
+        let mut slave: libc::c_int = -1;
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(rc, 0, "openpty failed: {}", std::io::Error::last_os_error());
+        unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) }
+    }
+
+    pub(crate) fn set_local_flags(slave: RawFd, echo: bool, canonical: bool) {
+        let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(slave, &mut termios) }, 0);
+        for (flag, on) in [(libc::ECHO, echo), (libc::ICANON, canonical)] {
+            if on {
+                termios.c_lflag |= flag;
+            } else {
+                termios.c_lflag &= !flag;
+            }
+        }
+        assert_eq!(
+            unsafe { libc::tcsetattr(slave, libc::TCSANOW, &termios) },
+            0
+        );
+    }
+
+    #[test]
+    fn password_input_needs_echo_off_and_line_input_on() {
+        assert!(is_password_input(libc::ICANON));
+        assert!(!is_password_input(libc::ICANON | libc::ECHO));
+        assert!(!is_password_input(0));
+        assert!(!is_password_input(libc::ECHO));
+    }
+
+    #[test]
+    fn master_sees_the_echo_setting_of_the_program_side() {
+        let (master, slave) = open_test_pty();
+        set_local_flags(slave.as_raw_fd(), true, true);
+        assert_eq!(password_input_active(master.as_raw_fd()), Some(false));
+
+        // sudo, ssh and passwd: echo off, line input kept.
+        set_local_flags(slave.as_raw_fd(), false, true);
+        assert_eq!(password_input_active(master.as_raw_fd()), Some(true));
+
+        // A full-screen program turns both off: not a password.
+        set_local_flags(slave.as_raw_fd(), false, false);
+        assert_eq!(password_input_active(master.as_raw_fd()), Some(false));
+    }
 }
