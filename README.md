@@ -39,6 +39,17 @@ https://github.com/user-attachments/assets/043ec09f-4bdd-41d5-aee0-8fda6b83e267
 
 ---
 
+## this fork
+
+[lucio-ferrao/herdr](https://github.com/lucio-ferrao/herdr) adds a few optional fields to the pane info of the socket api, so that a client typing into a pane (such as [Ecto](https://github.com/lucio-ferrao/termux-ghostty), an android ssh terminal, with the [Keyarchy](https://github.com/lucio-ferrao/Keyarchy) keyboard) knows what runs in it. Each change emits `pane.updated`.
+
+- `input_mode` — `"password"` while the terminal has echo off and canonical input on, as `sudo`, `ssh` and `passwd` do: a keyboard can stop suggesting and learning.
+- `foreground_process` — the leader of the foreground process group, e.g. `vim`, or the shell at its prompt.
+- `screen` — `"alternate"` while the program shows the alternate screen, which tells a full-screen program from a command line.
+- `agent_status_since` — when the agent status last changed, in unix milliseconds, kept by the server while no client is connected. Absent for the first status seen after a start or a handoff, which says nothing of when the agent got there.
+
+Build it as below and switch a running server to it with `herdr server live-handoff --import-exe <path>`; `herdr update` puts the official build back.
+
 ## install
 
 ```bash
