@@ -521,6 +521,12 @@ pub struct PaneInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_agent: Option<String>,
     pub agent_status: AgentStatus,
+    /// When the agent's state last changed (it started working, needed input or stopped), in Unix
+    /// milliseconds, so clients can order agents by recent activity. A pane that only becomes seen (done to
+    /// idle) keeps it. Kept by the server whether or not clients are connected, but not across a cold restart.
+    /// Absent until the first change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_status_since: Option<u64>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub state_labels: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

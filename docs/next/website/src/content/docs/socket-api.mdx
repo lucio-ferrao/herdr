@@ -732,6 +732,8 @@ If no native session reference is stored, the field is omitted.
 
 Each field is absent when it does not apply or is unknown.
 
+`PaneInfo` also exposes `agent_status_since`, the time of the last change of the agent's state (it started working, needed input or stopped), in Unix milliseconds, so clients can order agents by recent activity. Becoming seen (`done` to `idle`) does not change it. The server keeps it whether or not clients are connected, but not across a cold restart; it is absent until the first change.
+
 Use `pane.report_metadata` when a user hook wants to customize presentation without taking over lifecycle state from a Herdr integration.
 
 ```json

@@ -778,6 +778,15 @@
             "agent_status": {
               "$ref": "#/schemas/event/$defs/AgentStatus"
             },
+            "agent_status_since": {
+              "description": "When the agent's state last changed (it started working, needed input or stopped), in Unix\nmilliseconds, so clients can order agents by recent activity. A pane that only becomes seen (done to\nidle) keeps it. Kept by the server whether or not clients are connected, but not across a cold restart.\nAbsent until the first change.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "cwd": {
               "type": [
                 "string",
@@ -7934,6 +7943,15 @@
             },
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
+            },
+            "agent_status_since": {
+              "description": "When the agent's state last changed (it started working, needed input or stopped), in Unix\nmilliseconds, so clients can order agents by recent activity. A pane that only becomes seen (done to\nidle) keeps it. Kept by the server whether or not clients are connected, but not across a cold restart.\nAbsent until the first change.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "cwd": {
               "type": [

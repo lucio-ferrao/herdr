@@ -24,6 +24,13 @@ fn is_background_completion_transition(prev_state: AgentState, new_state: AgentS
         && matches!(prev_state, AgentState::Working | AgentState::Blocked)
 }
 
+/// Wall-clock time in Unix milliseconds, as clients read it (0 if the clock is before 1970).
+fn unix_millis_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
 fn is_completion_transition(change: &EffectiveStateChange) -> bool {
     is_background_completion_transition(change.previous_state, change.state)
 }
@@ -1755,6 +1762,10 @@ impl AppState {
         if change.previous_state != change.state {
             self.next_agent_state_change_seq += 1;
             if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
+                // the first state seen (after a start or a handoff) comes from Unknown and tells nothing of when the
+                // agent got there, so the time stays unknown
+                terminal.agent_state_changed_at =
+                    (change.previous_state != AgentState::Unknown).then(unix_millis_now);
                 terminal.last_agent_state_change_seq = Some(self.next_agent_state_change_seq);
                 terminal.last_agent_completion_seq = (!suppress_completion
                     && is_completion_transition(&change))
@@ -3023,6 +3034,33 @@ mod tests {
         let terminal = state.terminals.get(&terminal_id).unwrap();
         assert_eq!(terminal.state, AgentState::Working);
         assert_eq!(terminal.detected_agent, Some(Agent::Pi));
+    }
+
+    #[test]
+    fn state_changed_records_when_the_state_changed() {
+        let mut state = app_with_workspaces(&["test"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0].panes[&pane_id].attached_terminal_id.clone();
+        let report = |state: &mut AppState, agent_state| {
+            state.handle_app_event(AppEvent::StateChanged {
+                pane_id,
+                agent: Some(Agent::Pi),
+                state: agent_state,
+                visible_blocker: false,
+                visible_working: false,
+                process_exited: false,
+                observed_at: std::time::Instant::now(),
+            });
+            state.terminals[&terminal_id].agent_state_changed_at
+        };
+        assert_eq!(state.terminals[&terminal_id].agent_state_changed_at, None);
+        assert_eq!(report(&mut state, AgentState::Idle), None, "the first state seen has no known time");
+
+        let working = report(&mut state, AgentState::Working).expect("set when the state changes");
+        assert!(working > 1_700_000_000_000, "Unix milliseconds, got {working}");
+        state.terminals.get_mut(&terminal_id).unwrap().agent_state_changed_at = Some(1);
+        assert_eq!(report(&mut state, AgentState::Working), Some(1), "kept while the state stays");
+        assert!(report(&mut state, AgentState::Idle).unwrap() >= working, "moved when it changes");
     }
 
     #[test]

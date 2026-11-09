@@ -588,6 +588,8 @@ Herdr 存有原生会话引用时,`pane.get`、`pane.list`、`agent.get` 和 `ag
 
 不适用或未知的字段会被省略。
 
+`PaneInfo` 还公开 `agent_status_since`:代理状态最后一次变化(开始工作、需要输入或停止)的时间,单位为 Unix 毫秒,客户端可据此按最近活动排序代理。仅变为已查看(`done` 变为 `idle`)不会改变它。无论是否有客户端连接,服务器都会保留它,但冷重启后不保留;在第一次变化之前该字段省略。
+
 当用户钩子想自定义展示、又不从 Herdr 集成接管生命周期状态时,使用 `pane.report_metadata`。
 
 ```json

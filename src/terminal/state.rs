@@ -161,6 +161,8 @@ pub struct TerminalState {
     metadata_report_agents: HashMap<String, Agent>,
     metadata_token_sequence_sources: std::collections::HashSet<String>,
     pub state: AgentState,
+    /// Runtime only: wall-clock time (Unix milliseconds) of the last change of [Self::state].
+    pub agent_state_changed_at: Option<u64>,
     pub last_agent_state_change_seq: Option<u64>,
     pub last_agent_completion_seq: Option<u64>,
     pub revision: u64,
@@ -204,6 +206,7 @@ impl TerminalState {
             metadata_report_agents: HashMap::new(),
             metadata_token_sequence_sources: std::collections::HashSet::new(),
             state: AgentState::Unknown,
+            agent_state_changed_at: None,
             last_agent_state_change_seq: None,
             last_agent_completion_seq: None,
             revision: 0,

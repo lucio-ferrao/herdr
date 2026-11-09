@@ -737,6 +737,7 @@ mod tests {
             tokens: HashMap::new(),
             agent_session: None,
             scroll,
+            agent_status_since: None,
             input_mode: None,
             foreground_process: None,
             screen: None,
