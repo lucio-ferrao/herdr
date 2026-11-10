@@ -41,7 +41,7 @@ https://github.com/user-attachments/assets/043ec09f-4bdd-41d5-aee0-8fda6b83e267
 
 ## this fork
 
-[lucio-ferrao/herdr](https://github.com/lucio-ferrao/herdr) adds a few optional fields to the pane info of the socket api, so that a client typing into a pane (such as [Ecto](https://github.com/lucio-ferrao/termux-ghostty), an android ssh terminal, with the [Keyarchy](https://github.com/lucio-ferrao/Keyarchy) keyboard) knows what runs in it. Each change emits `pane.updated`.
+[lucio-ferrao/herdr](https://github.com/lucio-ferrao/herdr) adds a few optional fields to the pane info of the socket api, so that a client typing into a pane (such as [Termarchy](https://github.com/lucio-ferrao/Termarchy), an android ssh terminal, with the [Keyarchy](https://github.com/lucio-ferrao/Keyarchy) keyboard) knows what runs in it. Each change emits `pane.updated`.
 
 - `input_mode` — `"password"` while the terminal has echo off and canonical input on, as `sudo`, `ssh` and `passwd` do: a keyboard can stop suggesting and learning.
 - `foreground_process` — the leader of the foreground process group, e.g. `vim`, or the shell at its prompt.
