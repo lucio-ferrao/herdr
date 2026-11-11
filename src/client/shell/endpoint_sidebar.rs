@@ -192,6 +192,7 @@ pub(super) fn render_collapsed(
                 workspace_id: workspace.workspace_id.clone(),
                 indented: false,
                 group_toggle: None,
+                block_bottom: rect.bottom(),
             });
             y = y.saturating_add(1);
         }
@@ -503,6 +504,7 @@ pub(super) fn render_expanded(
                     workspace_id: workspace.workspace_id.clone(),
                     indented: entry.indented,
                     group_toggle,
+                    block_bottom: rect.bottom(),
                 });
                 y = y
                     .saturating_add(height)

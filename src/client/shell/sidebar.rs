@@ -107,6 +107,7 @@ pub(crate) fn render_collapsed_sidebar(
             workspace_id: workspace.workspace_id.clone(),
             indented: false,
             group_toggle: None,
+            block_bottom: rect.bottom(),
         });
     }
 
@@ -196,6 +197,147 @@ pub(crate) fn render_collapsed_sidebar(
     );
 }
 
+/// One line of the expanded sidebar: a space, or an agent listed under its space.
+pub(in crate::client::shell) enum SidebarItem {
+    Workspace {
+        entry: WorkspaceEntry,
+        has_agents: bool,
+        collapsed: bool,
+    },
+    Agent {
+        indented: bool,
+        row: super::agent_sidebar::AgentRow,
+    },
+}
+
+/// The spaces in sidebar order, each followed by its agents unless it is collapsed.
+pub(in crate::client::shell) fn sidebar_items(
+    snapshot: &ClientShellSnapshot,
+    config: &ClientShellConfig,
+    collapsed_groups: &HashSet<String>,
+    collapsed_workspaces: &HashSet<String>,
+) -> Vec<SidebarItem> {
+    let mut agents = HashMap::<String, Vec<super::agent_sidebar::AgentRow>>::new();
+    for mut agent in super::agent_sidebar::agent_rows(snapshot, config, None) {
+        // the space above already names it, and the state shows on the right
+        for row in &mut agent.rows {
+            row.retain(|token| {
+                !matches!(
+                    token.kind,
+                    crate::ui::ResolvedTokenKind::Workspace(_)
+                        | crate::ui::ResolvedTokenKind::StateIcon
+                        | crate::ui::ResolvedTokenKind::StateText(_)
+                )
+            });
+        }
+        agent.rows.retain(|row| !row.is_empty());
+        agents
+            .entry(agent.workspace_id.clone())
+            .or_default()
+            .push(agent);
+    }
+    let mut items = Vec::new();
+    for entry in workspace_entries(snapshot, collapsed_groups) {
+        let workspace_id = &snapshot.workspaces[entry.index].workspace_id;
+        let rows = agents.remove(workspace_id).unwrap_or_default();
+        let collapsed = collapsed_workspaces.contains(workspace_id);
+        items.push(SidebarItem::Workspace {
+            entry,
+            has_agents: !rows.is_empty(),
+            collapsed,
+        });
+        if !collapsed {
+            items.extend(rows.into_iter().map(|row| SidebarItem::Agent {
+                indented: entry.indented,
+                row,
+            }));
+        }
+    }
+    items
+}
+
+/// The rows of a space's line, without the state icon: its state shows on the right.
+fn sidebar_workspace_rows(
+    snapshot: &ClientShellSnapshot,
+    workspace: &ClientShellWorkspace,
+    entry: &WorkspaceEntry,
+    collapsed_groups: &HashSet<String>,
+    config: &ClientShellConfig,
+) -> (
+    crate::api::schema::AgentStatus,
+    Vec<Vec<crate::ui::ResolvedToken>>,
+) {
+    let status = displayed_workspace_status(snapshot, workspace, collapsed_groups);
+    let mut rows = workspace_rows(workspace, status, entry.indented, &config.spaces);
+    for row in &mut rows {
+        row.retain(|token| {
+            !matches!(
+                token.kind,
+                crate::ui::ResolvedTokenKind::StateIcon
+                    | crate::ui::ResolvedTokenKind::StateText(_)
+            )
+        });
+    }
+    rows.retain(|row| !row.is_empty());
+    (status, rows)
+}
+
+fn sidebar_item_height(
+    item: &SidebarItem,
+    snapshot: &ClientShellSnapshot,
+    collapsed_groups: &HashSet<String>,
+    config: &ClientShellConfig,
+) -> u16 {
+    let lines = match item {
+        SidebarItem::Workspace { entry, .. } => {
+            snapshot.workspaces.get(entry.index).map_or(1, |workspace| {
+                sidebar_workspace_rows(snapshot, workspace, entry, collapsed_groups, config)
+                    .1
+                    .len()
+            })
+        }
+        SidebarItem::Agent { row, .. } => row.rows.len(),
+    };
+    lines.max(1).min(u16::MAX as usize) as u16
+}
+
+fn sidebar_item_gap(
+    current: &SidebarItem,
+    next: Option<&SidebarItem>,
+    config: &ClientShellConfig,
+) -> u16 {
+    match (current, next) {
+        (_, Some(SidebarItem::Workspace { entry, .. })) => {
+            u16::from(!entry.indented) * config.spaces.row_gap
+        }
+        (SidebarItem::Agent { .. }, Some(SidebarItem::Agent { .. })) => config.agents.row_gap,
+        _ => 0,
+    }
+}
+
+/// The state written on the right of a sidebar line; idle needs no mark.
+fn status_mark(status: crate::api::schema::AgentStatus) -> Option<&'static str> {
+    use crate::api::schema::AgentStatus;
+    match status {
+        AgentStatus::Blocked => Some("blocked"),
+        AgentStatus::Done => Some("done"),
+        AgentStatus::Working => Some("working"),
+        AgentStatus::Idle | AgentStatus::Unknown => None,
+    }
+}
+
+/// The position of a space in the expanded sidebar list.
+pub(in crate::client::shell) fn sidebar_item_position(
+    items: &[SidebarItem],
+    snapshot: &ClientShellSnapshot,
+    workspace_id: &str,
+) -> Option<usize> {
+    items.iter().position(|item| {
+        matches!(item, SidebarItem::Workspace { entry, .. }
+            if snapshot.workspaces[entry.index].workspace_id == workspace_id)
+    })
+}
+
 pub(crate) fn render_sidebar(
     buffer: &mut Buffer,
     area: Rect,
@@ -211,10 +353,14 @@ pub(crate) fn render_sidebar(
     } else {
         Rect::new(area.right().saturating_sub(1), area.y, 1, area.height)
     };
-    let (workspace_area, detail_area) =
-        crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
-    hits.sidebar_section_divider =
-        crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
+    // one list for spaces and their agents; the last row keeps the sidebar toggle
+    let workspace_area = Rect::new(
+        area.x,
+        area.y,
+        area.width.saturating_sub(1),
+        area.height.saturating_sub(1),
+    );
+    hits.sidebar_section_divider = Rect::default();
     put_text(
         buffer,
         workspace_area.x,
@@ -226,7 +372,12 @@ pub(crate) fn render_sidebar(
             .add_modifier(Modifier::BOLD),
     );
 
-    let entries = workspace_entries(snapshot, state.collapsed_groups);
+    let items = sidebar_items(
+        snapshot,
+        config,
+        state.collapsed_groups,
+        state.collapsed_workspaces,
+    );
     let body = Rect::new(
         workspace_area.x,
         workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
@@ -236,34 +387,14 @@ pub(crate) fn render_sidebar(
             .saturating_sub(WORKSPACE_HEADER_ROWS + 1),
     );
     hits.workspace_body = body;
-    let row_heights = entries
+    let row_heights = items
         .iter()
-        .map(|entry| {
-            snapshot
-                .workspaces
-                .get(entry.index)
-                .map(|workspace| {
-                    workspace_rows(
-                        workspace,
-                        displayed_workspace_status(snapshot, workspace, state.collapsed_groups),
-                        entry.indented,
-                        &config.spaces,
-                    )
-                    .len()
-                    .max(1)
-                    .min(u16::MAX as usize) as u16
-                })
-                .unwrap_or(1)
-        })
+        .map(|item| sidebar_item_height(item, snapshot, state.collapsed_groups, config))
         .collect::<Vec<_>>();
-    let gaps = entries
+    let gaps = items
         .iter()
         .enumerate()
-        .map(|(index, _)| {
-            entries
-                .get(index + 1)
-                .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap)
-        })
+        .map(|(index, item)| sidebar_item_gap(item, items.get(index + 1), config))
         .collect::<Vec<_>>();
     let mut metrics = super::scroll::list_scroll_metrics(
         &row_heights,
@@ -272,9 +403,10 @@ pub(crate) fn render_sidebar(
         *state.workspace_scroll,
     );
     if !body.is_empty() && std::mem::take(state.reveal_focused_workspace) {
-        if let Some(target) = entries
-            .iter()
-            .position(|entry| snapshot.workspaces[entry.index].focused)
+        if let Some(target) = snapshot
+            .focused_workspace_id
+            .as_deref()
+            .and_then(|workspace_id| sidebar_item_position(&items, snapshot, workspace_id))
         {
             *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
                 &row_heights,
@@ -299,60 +431,154 @@ pub(crate) fn render_sidebar(
     let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
     let mut y = body.y;
-    for (entry_position, entry) in entries.iter().enumerate().skip(*state.workspace_scroll) {
-        let Some(workspace) = snapshot.workspaces.get(entry.index) else {
-            continue;
-        };
-        let status = displayed_workspace_status(snapshot, workspace, state.collapsed_groups);
-        let rows = workspace_rows(workspace, status, entry.indented, &config.spaces);
-        let row_height = (rows.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
+    for (item_position, item) in items.iter().enumerate().skip(*state.workspace_scroll) {
+        let row_height = row_heights[item_position].min(body.height);
         if y.saturating_add(row_height) > body.bottom() {
             break;
         }
         let rect = Rect::new(body.x, y, content_width, row_height);
-        let selected = state.selected_workspace_id.is_some_and(|target| {
-            target.matches(state.active_endpoint_id, &workspace.workspace_id)
-        });
-        let dragged = state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
-        if selected {
-            buffer.set_style(rect, Style::default().bg(palette.selection_bg));
-        } else if dragged {
-            buffer.set_style(rect, Style::default().bg(palette.surface1));
-        } else if workspace.focused {
-            buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+        match item {
+            SidebarItem::Workspace {
+                entry,
+                has_agents,
+                collapsed,
+            } => {
+                let Some(workspace) = snapshot.workspaces.get(entry.index) else {
+                    continue;
+                };
+                let (status, rows) = sidebar_workspace_rows(
+                    snapshot,
+                    workspace,
+                    entry,
+                    state.collapsed_groups,
+                    config,
+                );
+                let selected = state.selected_workspace_id.is_some_and(|target| {
+                    target.matches(state.active_endpoint_id, &workspace.workspace_id)
+                });
+                let dragged = state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
+                // the focused agent marks where you are; the space itself is not highlighted
+                if selected {
+                    buffer.set_style(rect, Style::default().bg(palette.selection_bg));
+                } else if dragged {
+                    buffer.set_style(rect, Style::default().bg(palette.surface1));
+                }
+                // an expanded space leaves its state to its agents
+                let mark = if *has_agents && !*collapsed {
+                    None
+                } else {
+                    status_mark(status)
+                };
+                let mark_width = mark.map_or(0, |mark| display_width(mark) + 1);
+                if *has_agents {
+                    let toggle = Rect::new(
+                        rect.x.saturating_add(1),
+                        rect.y,
+                        u16::from(rect.width > 1),
+                        1,
+                    );
+                    put_text(
+                        buffer,
+                        toggle.x,
+                        toggle.y,
+                        toggle.width,
+                        if *collapsed { "▸" } else { "▾" },
+                        Style::default().fg(palette.overlay0),
+                    );
+                    hits.workspace_toggles
+                        .push((toggle, workspace.workspace_id.clone()));
+                }
+                let nested = Rect::new(
+                    rect.x.saturating_add(2),
+                    rect.y,
+                    rect.width.saturating_sub(2 + mark_width),
+                    rect.height,
+                );
+                render_workspace_rows(
+                    buffer,
+                    nested,
+                    status,
+                    config.status_indicators,
+                    entry,
+                    rows,
+                    false,
+                    selected,
+                    state.selected_workspace_id.is_some(),
+                    dragged,
+                    palette,
+                );
+                // the toggle's columns share the row's background
+                if !nested.is_empty() {
+                    for y in rect.y..rect.bottom() {
+                        let background = buffer[(nested.x, y)].bg;
+                        for x in rect.x..nested.x {
+                            buffer[(x, y)].set_bg(background);
+                        }
+                    }
+                }
+                let group_toggle = render_parent_group_toggle(
+                    buffer,
+                    rect,
+                    snapshot,
+                    entry.index,
+                    state.collapsed_groups,
+                    palette,
+                );
+                if let Some(mark) = mark {
+                    let right =
+                        rect.width
+                            .saturating_sub(if group_toggle.is_some() { 2 } else { 1 });
+                    put_right_text(
+                        buffer,
+                        Rect::new(rect.x, rect.y, right, 1),
+                        rect.y,
+                        mark,
+                        Style::default().fg(status_color(status, palette)),
+                    );
+                }
+                hits.workspaces.push(WorkspaceHit {
+                    rect,
+                    endpoint_id: ClientEndpointId::Local,
+                    workspace_id: workspace.workspace_id.clone(),
+                    indented: entry.indented,
+                    group_toggle,
+                    block_bottom: rect.bottom(),
+                });
+            }
+            SidebarItem::Agent { indented, row } => {
+                if row.focused {
+                    buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+                }
+                let indent = if *indented { 6 } else { 4 };
+                let mark = status_mark(row.status).map(|_| row.state_text.as_str());
+                let mark_width = mark.map_or(0, |mark| display_width(mark) + 2);
+                super::agent_sidebar::render_agent_row(
+                    buffer,
+                    Rect::new(
+                        rect.x.saturating_add(indent),
+                        rect.y,
+                        rect.width.saturating_sub(indent + mark_width),
+                        rect.height,
+                    ),
+                    row,
+                    config,
+                );
+                if let Some(mark) = mark {
+                    put_right_text(
+                        buffer,
+                        Rect::new(rect.x, rect.y, rect.width.saturating_sub(1), 1),
+                        rect.y,
+                        mark,
+                        Style::default().fg(status_color(row.status, palette)),
+                    );
+                }
+                hits.agents.push((rect, row.pane_id.clone()));
+                if let Some(space) = hits.workspaces.last_mut() {
+                    space.block_bottom = rect.bottom();
+                }
+            }
         }
-        render_workspace_rows(
-            buffer,
-            rect,
-            status,
-            config.status_indicators,
-            entry,
-            rows,
-            workspace.focused,
-            selected,
-            state.selected_workspace_id.is_some(),
-            dragged,
-            palette,
-        );
-        let group_toggle = render_parent_group_toggle(
-            buffer,
-            rect,
-            snapshot,
-            entry.index,
-            state.collapsed_groups,
-            palette,
-        );
-        hits.workspaces.push(WorkspaceHit {
-            rect,
-            endpoint_id: ClientEndpointId::Local,
-            workspace_id: workspace.workspace_id.clone(),
-            indented: entry.indented,
-            group_toggle,
-        });
-        let gap = entries
-            .get(entry_position + 1)
-            .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap);
-        y = y.saturating_add(row_height + gap);
+        y = y.saturating_add(row_height + gaps[item_position]);
     }
 
     if show_scrollbar {
@@ -429,15 +655,6 @@ pub(crate) fn render_sidebar(
             );
         }
     }
-
-    super::render_agent_panel(
-        buffer,
-        detail_area,
-        snapshot,
-        config,
-        state.agent_scroll,
-        hits,
-    );
 
     hits.sidebar_toggle = Rect::new(
         area.right().saturating_sub(2),

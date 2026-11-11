@@ -12,7 +12,10 @@ use super::*;
 
 pub(super) struct AgentRow {
     pub(super) pane_id: String,
+    pub(super) workspace_id: String,
     pub(super) status: crate::api::schema::AgentStatus,
+    /// The state as the agent names it, defaulting to herdr's words.
+    pub(super) state_text: String,
     pub(super) focused: bool,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
 }
@@ -47,44 +50,6 @@ pub(super) fn ordered_agent_pane_ids(
         .into_iter()
         .map(|agent| agent.pane_id.clone())
         .collect()
-}
-
-pub(super) fn render_agent_panel(
-    buffer: &mut Buffer,
-    area: Rect,
-    snapshot: &ClientShellSnapshot,
-    config: &ClientShellConfig,
-    agent_scroll: &mut usize,
-    hits: &mut ShellHitMap,
-) {
-    if !render_agent_panel_header(
-        buffer,
-        area,
-        snapshot.agent_view_label.as_deref(),
-        config,
-        hits,
-    ) {
-        return;
-    }
-
-    let rows = agent_rows(snapshot, config, None);
-    render_agent_list(
-        buffer,
-        area,
-        &rows,
-        snapshot
-            .agent_view_label
-            .as_ref()
-            .map(|_| " no matching agents"),
-        config,
-        agent_scroll,
-        hits,
-        |row| row.rows.len(),
-        |buffer, rect, row, hits| {
-            hits.agents.push((rect, row.pane_id.clone()));
-            render_agent_row(buffer, rect, row, config);
-        },
-    );
 }
 
 pub(super) fn render_agent_panel_header(
@@ -264,14 +229,7 @@ pub(super) fn agent_row(
         .panes
         .iter()
         .find(|pane| pane.pane_id == agent.pane_id);
-    let tab_count = snapshot
-        .tabs
-        .iter()
-        .filter(|candidate| candidate.workspace_id == agent.workspace_id)
-        .count();
-    let tab_label = tab
-        .filter(|tab| tab_count > 1 || tab.custom_label)
-        .map(|tab| tab.label.as_str());
+    let tab_label = tab.map(|tab| tab.label.as_str());
     let agent_label = agent
         .display_agent
         .as_deref()
@@ -312,7 +270,9 @@ pub(super) fn agent_row(
     );
     Some(AgentRow {
         pane_id: agent.pane_id.clone(),
+        workspace_id: agent.workspace_id.clone(),
         status: agent.agent_status,
+        state_text: state_text.to_owned(),
         focused: agent.focused,
         rows,
     })

@@ -130,7 +130,7 @@ fn grouped_worktrees_render_parent_branch_and_indented_child() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("main"));
+    assert!(!text.contains("main"), "no git branch in the sidebar");
     assert!(text.contains("└─"));
     assert!(text.contains("feature"));
 
@@ -147,12 +147,12 @@ fn grouped_worktrees_render_parent_branch_and_indented_child() {
     state.set_pane_surface(replacement_surface);
     let collapsed = state.compose(106, 20).expect("collapsed worktree group");
     let parent = state.hits.workspaces[0].rect;
-    let status_cell = usize::from(parent.y) * usize::from(collapsed.width)
-        + usize::from(parent.x.saturating_add(1));
-    assert_eq!(
-        collapsed.cells[status_cell].fg,
-        crate::protocol::color_to_u32(state.config.palette.red)
-    );
+    // the group's state is written on the right of the parent
+    let row_start = usize::from(parent.y) * usize::from(collapsed.width);
+    assert!((parent.x..parent.right()).any(|x| {
+        collapsed.cells[row_start + usize::from(x)].fg
+            == crate::protocol::color_to_u32(state.config.palette.red)
+    }));
 
     let mut next = ClientShellInput::default();
     state.record_binding(
@@ -691,6 +691,8 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
         },
     ];
     let mut config = Config::default();
+    // room for the agents' tokens and states under their space
+    config.ui.sidebar_width = 40;
     config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
     config.ui.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
     config.ui.sidebar.agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
@@ -722,9 +724,10 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("× needs input"), "frame: {text}");
+    assert!(text.contains("needs input"), "frame: {text}");
+    assert!(!text.contains("×"), "states are words, not symbols: {text}");
     assert!(text.contains("pi two"), "frame: {text}");
-    assert!(text.contains("waiting for"), "frame: {text}");
+    assert!(text.contains("waiting"), "frame: {text}");
     assert_eq!(
         state
             .hits
@@ -757,24 +760,6 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
             .first()
             .map(|(_, pane_id)| pane_id.as_str()),
         Some("pane_2")
-    );
-    let body = state.hits.agent_body;
-    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
-        kind: MouseEventKind::ScrollDown,
-        column: body.x,
-        row: body.y,
-        modifiers: KeyModifiers::empty(),
-    })]);
-    state
-        .compose(106, 10)
-        .expect("scrolled agent sidebar frame");
-    assert_eq!(
-        state
-            .hits
-            .agents
-            .first()
-            .map(|(_, pane_id)| pane_id.as_str()),
-        Some("pane_1")
     );
 
     state.sidebar_collapsed = true;
@@ -812,7 +797,14 @@ fn muted_agent_sidebar_rows_do_not_stack_terminal_faint() {
         tokens: Vec::new(),
         focused: true,
     }];
-    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut config = Config::default();
+    config.ui.sidebar_width = 34;
+    config.ui.sidebar.agents.rows = vec![vec![
+        crate::config::AgentSidebarToken::StateIcon,
+        crate::config::AgentSidebarToken::Tab,
+        crate::config::AgentSidebarToken::Agent,
+    ]];
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
     let frame = state.compose(106, 30).expect("agent sidebar frame");
@@ -838,13 +830,15 @@ fn workspace_state_text_does_not_stack_terminal_faint() {
         vec![SpaceSidebarToken::StateIcon, SpaceSidebarToken::Workspace],
         vec![SpaceSidebarToken::StateText],
     ];
+    let mut working = snapshot();
+    working.workspaces[0].agent_status = AgentStatus::Working;
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
-    state.set_snapshot(Box::new(snapshot()));
+    state.set_snapshot(Box::new(working));
     state.set_pane_surface(surface());
     let frame = state.compose(106, 30).expect("workspace sidebar frame");
     let rect = state.hits.workspaces.first().expect("workspace hit").rect;
     let buffer = frame.to_ratatui_buffer().expect("workspace sidebar buffer");
-    let (x, y) = cell_symbol_position(&frame, rect, "idle");
+    let (x, y) = cell_symbol_position(&frame, rect, "working");
     let cell = buffer.cell((x, y)).expect("workspace state text cell");
     assert!(
         !cell.modifier.contains(Modifier::DIM),
@@ -956,64 +950,6 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
                 crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_2"
             )
     ));
-}
-
-#[test]
-fn agent_sort_toggle_is_client_local_and_persists_per_endpoint() {
-    let path = std::env::temp_dir().join(format!(
-        "herdr-shell-agent-sort-{}-{}.json",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos()
-    ));
-    let mut projected = snapshot();
-    projected.agents.push(ClientShellAgent {
-        pane_id: "pane_1".into(),
-        workspace_id: "ws_1".into(),
-        tab_id: "tab_1".into(),
-        name: Some("pi".into()),
-        display_agent: None,
-        agent: Some("pi".into()),
-        title: None,
-        terminal_title: None,
-        terminal_title_stripped: None,
-        agent_status: AgentStatus::Working,
-        state_change_seq: 1,
-        state_labels: Vec::new(),
-        tokens: Vec::new(),
-        focused: true,
-    });
-    let config =
-        ClientShellConfig::from_config(&Config::default()).with_preferences_path(path.clone());
-    let mut state = ClientShellState::new(config);
-    state.set_snapshot(Box::new(projected));
-    state.set_pane_surface(surface());
-    state.compose(106, 30).expect("agent sidebar frame");
-    let toggle = state.hits.agent_sort_toggle;
-
-    let click = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: toggle.x,
-        row: toggle.y,
-        modifiers: KeyModifiers::empty(),
-    })]);
-
-    assert_eq!(
-        state.config.agent_panel_sort,
-        crate::config::AgentPanelSortConfig::Priority
-    );
-    assert!(click.actions.is_empty());
-    let reloaded_config =
-        ClientShellConfig::from_config(&Config::default()).with_preferences_path(path.clone());
-    let reloaded = ClientShellState::new(reloaded_config);
-    assert_eq!(
-        reloaded.config.agent_panel_sort,
-        crate::config::AgentPanelSortConfig::Priority
-    );
-    assert!(reloaded.agent_panel_sort_manual);
-    std::fs::remove_file(path).expect("remove agent sort preferences");
 }
 
 #[test]

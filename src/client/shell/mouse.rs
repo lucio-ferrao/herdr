@@ -572,7 +572,7 @@ impl ClientShellState {
                     .get(entry.index)
                     .map(|workspace| workspace.workspace_id.clone())
             });
-            let row = last_hit.rect.bottom();
+            let row = last_hit.block_bottom;
             if row < self.hits.new_workspace.y {
                 slots.push((before, row));
             }
@@ -1843,6 +1843,36 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                // an agent row offers the menu of its tab
+                let agent_tab_id = self
+                    .hits
+                    .agents
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .map(|(_, pane_id)| pane_id)
+                    .or_else(|| {
+                        self.hits
+                            .endpoint_agents
+                            .iter()
+                            .find(|(rect, endpoint_id, _)| {
+                                *endpoint_id == self.active_endpoint_id
+                                    && super::contains(*rect, point)
+                            })
+                            .map(|(_, _, pane_id)| pane_id)
+                    })
+                    .and_then(|pane_id| {
+                        self.snapshot
+                            .as_deref()?
+                            .agents
+                            .iter()
+                            .find(|agent| agent.pane_id == *pane_id)
+                    })
+                    .map(|agent| agent.tab_id.clone());
+                if let Some(tab_id) = agent_tab_id {
+                    self.open_tab_context_menu(tab_id, mouse.column, mouse.row);
+                    outcome.repaint = true;
+                    return;
+                }
                 let tab_id = self
                     .hits
                     .tabs
@@ -2086,6 +2116,20 @@ impl ClientShellState {
                         .saturating_add(1)
                         .min(tab_count.saturating_sub(1));
                     outcome.repaint = true;
+                    return;
+                }
+                let workspace_toggle = self
+                    .hits
+                    .workspace_toggles
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .map(|(_, workspace_id)| workspace_id.clone());
+                if let Some(workspace_id) = workspace_toggle {
+                    if !self.collapsed_workspaces.remove(&workspace_id) {
+                        self.collapsed_workspaces.insert(workspace_id);
+                    }
+                    outcome.repaint = true;
+                    self.persist_chrome_preferences(outcome);
                     return;
                 }
                 let group_toggle = self.hits.workspaces.iter().find_map(|hit| {

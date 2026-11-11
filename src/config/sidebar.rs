@@ -444,10 +444,16 @@ impl Default for AgentsSidebarConfig {
                 vec![
                     AgentSidebarToken::StateIcon,
                     AgentSidebarToken::Machine,
-                    AgentSidebarToken::Workspace,
                     AgentSidebarToken::Tab,
                 ],
-                vec![AgentSidebarToken::Agent],
+                vec![AgentSidebarToken::Styled {
+                    token: Box::new(AgentSidebarToken::Workspace),
+                    style: SidebarTokenStyle {
+                        bold: Some(false),
+                        ..Default::default()
+                    },
+                    rules: Vec::new(),
+                }],
             ],
             rows_by_agent: BTreeMap::new(),
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
@@ -466,10 +472,10 @@ pub struct SpacesSidebarConfig {
 impl Default for SpacesSidebarConfig {
     fn default() -> Self {
         Self {
-            rows: vec![
-                vec![SpaceSidebarToken::StateIcon, SpaceSidebarToken::Workspace],
-                vec![SpaceSidebarToken::Branch, SpaceSidebarToken::GitStatus],
-            ],
+            rows: vec![vec![
+                SpaceSidebarToken::StateIcon,
+                SpaceSidebarToken::Workspace,
+            ]],
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
         }
     }
@@ -495,20 +501,26 @@ mod tests {
                 vec![
                     AgentSidebarToken::StateIcon,
                     AgentSidebarToken::Machine,
-                    AgentSidebarToken::Workspace,
                     AgentSidebarToken::Tab,
                 ],
-                vec![AgentSidebarToken::Agent],
+                vec![AgentSidebarToken::Styled {
+                    token: Box::new(AgentSidebarToken::Workspace),
+                    style: SidebarTokenStyle {
+                        bold: Some(false),
+                        ..Default::default()
+                    },
+                    rules: Vec::new(),
+                }],
             ]
         );
         assert!(config.agents.rows_by_agent.is_empty());
         assert_eq!(config.agents.row_gap, 0);
         assert_eq!(
             config.spaces.rows,
-            vec![
-                vec![SpaceSidebarToken::StateIcon, SpaceSidebarToken::Workspace],
-                vec![SpaceSidebarToken::Branch, SpaceSidebarToken::GitStatus],
-            ]
+            vec![vec![
+                SpaceSidebarToken::StateIcon,
+                SpaceSidebarToken::Workspace,
+            ]]
         );
         assert_eq!(config.spaces.row_gap, 0);
     }

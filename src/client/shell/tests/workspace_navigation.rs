@@ -107,7 +107,8 @@ fn local_navigation_highlight_stays_visible_with_terminal_theme() {
                 }
                 let untouched = workspace_rect(&state, &ClientEndpointId::Local, "ws_3");
                 assert_ne!(buffer[(untouched.x, untouched.y)].bg, expected_bg);
-                if workspace_id != "ws_1" {
+                // only the collapsed sidebar marks the focused space
+                if compact && workspace_id != "ws_1" {
                     let focused = workspace_rect(&state, &ClientEndpointId::Local, "ws_1");
                     assert_eq!(
                         buffer[(focused.x, focused.y)].bg,
@@ -135,7 +136,11 @@ fn local_navigation_highlight_stays_visible_with_terminal_theme() {
             let focused = workspace_rect(&state, &ClientEndpointId::Local, "ws_1");
             assert_eq!(
                 buffer[(focused.x, focused.y)].bg,
-                state.config.palette.active_row_bg
+                if compact {
+                    state.config.palette.active_row_bg
+                } else {
+                    state.config.palette.sidebar_bg
+                }
             );
             let cancelled = workspace_rect(&state, &ClientEndpointId::Local, "ws_3");
             assert_eq!(
@@ -585,10 +590,11 @@ fn aggregate_navigation_reveals_overflow_and_preserves_order() {
     }
 }
 
-fn local_navigation_state(compact: bool) -> ClientShellState {
+/// Uses the collapsed sidebar: the expanded one marks the focused agent, not its space.
+fn local_navigation_state() -> ClientShellState {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.config.palette = Palette::terminal();
-    state.sidebar_collapsed = compact;
+    state.sidebar_collapsed = true;
     state.set_snapshot(Box::new(workspaces(3)));
     state.set_pane_surface(surface());
     state.compose(100, 28).unwrap();
@@ -639,55 +645,53 @@ fn set_local_focus(state: &mut ClientShellState, workspace_id: &str, revision: u
 
 #[test]
 fn accepted_local_navigation_keeps_highlight_until_authoritative_focus() {
-    for compact in [false, true] {
-        for response_first in [false, true] {
-            let mut state = local_navigation_state(compact);
-            let request_id = request_local_navigation(&mut state, 2);
-            assert_eq!(state.mode, ClientShellMode::Terminal);
-            assert!(state.navigate_workspace_id.is_none());
-            assert_eq!(
-                state
-                    .snapshot
-                    .as_ref()
-                    .unwrap()
-                    .focused_workspace_id
-                    .as_deref(),
-                Some("ws_1")
+    for response_first in [false, true] {
+        let mut state = local_navigation_state();
+        let request_id = request_local_navigation(&mut state, 2);
+        assert_eq!(state.mode, ClientShellMode::Terminal);
+        assert!(state.navigate_workspace_id.is_none());
+        assert_eq!(
+            state
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .focused_workspace_id
+                .as_deref(),
+            Some("ws_1")
+        );
+        assert_eq!(state.focused_pane_id().as_deref(), Some("pane_1"));
+        assert_local_highlight(&mut state, "ws_3");
+        state.invalidate_pane_surface();
+        assert_local_highlight(&mut state, "ws_3");
+        state.set_pane_surface(surface());
+        if response_first {
+            state.handle_endpoint_result(
+                "boot-1",
+                &request_id,
+                Ok(crate::api::schema::ResponseResult::Ok {}),
             );
-            assert_eq!(state.focused_pane_id().as_deref(), Some("pane_1"));
             assert_local_highlight(&mut state, "ws_3");
-            state.invalidate_pane_surface();
-            assert_local_highlight(&mut state, "ws_3");
-            state.set_pane_surface(surface());
-            if response_first {
-                state.handle_endpoint_result(
-                    "boot-1",
-                    &request_id,
-                    Ok(crate::api::schema::ResponseResult::Ok {}),
-                );
-                assert_local_highlight(&mut state, "ws_3");
-            }
-            set_local_focus(&mut state, "ws_1", 2);
-            assert_local_highlight(&mut state, "ws_3");
-            set_local_focus(&mut state, "ws_3", 3);
-            assert_local_highlight(&mut state, "ws_3");
-            if !response_first {
-                state.handle_endpoint_result(
-                    "boot-1",
-                    &request_id,
-                    Ok(crate::api::schema::ResponseResult::Ok {}),
-                );
-            }
-            set_local_focus(&mut state, "ws_2", 4);
-            assert_local_highlight(&mut state, "ws_2");
         }
+        set_local_focus(&mut state, "ws_1", 2);
+        assert_local_highlight(&mut state, "ws_3");
+        set_local_focus(&mut state, "ws_3", 3);
+        assert_local_highlight(&mut state, "ws_3");
+        if !response_first {
+            state.handle_endpoint_result(
+                "boot-1",
+                &request_id,
+                Ok(crate::api::schema::ResponseResult::Ok {}),
+            );
+        }
+        set_local_focus(&mut state, "ws_2", 4);
+        assert_local_highlight(&mut state, "ws_2");
     }
 }
 
 #[test]
 fn failed_local_navigation_releases_only_its_own_highlight() {
     for failure in ["rejected", "endpoint_timeout", "cancelled"] {
-        let mut state = local_navigation_state(false);
+        let mut state = local_navigation_state();
         let request_id = request_local_navigation(&mut state, 2);
         assert_local_highlight(&mut state, "ws_3");
         if failure == "cancelled" {
@@ -711,7 +715,7 @@ fn failed_local_navigation_releases_only_its_own_highlight() {
         assert_local_highlight(&mut state, "ws_1");
     }
     for old_down in [1, 2] {
-        let mut state = local_navigation_state(false);
+        let mut state = local_navigation_state();
         let old_request = request_local_navigation(&mut state, old_down);
         let latest_request = request_local_navigation(&mut state, 2);
         state.cancel_endpoint_request(&old_request);
@@ -731,7 +735,7 @@ fn pending_navigation_highlight_does_not_survive_identity_changes() {
         "deleted",
         "endpoint",
     ] {
-        let mut state = local_navigation_state(false);
+        let mut state = local_navigation_state();
         let request_id = request_local_navigation(&mut state, 2);
         state.handle_endpoint_result(
             "boot-1",
@@ -788,7 +792,7 @@ fn pending_navigation_highlight_does_not_survive_identity_changes() {
 
 #[test]
 fn navigation_highlight_requires_enqueued_focus_and_yields_to_new_intent() {
-    let mut state = local_navigation_state(false);
+    let mut state = local_navigation_state();
     state.set_endpoint_methods(Some(Vec::new()));
     enter_navigation(&mut state);
     preview_key(&mut state, b"\x1b[B");
@@ -837,7 +841,7 @@ fn directional_pane_focus_releases_an_accepted_workspace_highlight() {
         (b'l', PaneDirection::Right),
     ] {
         for rejected in [false, true] {
-            let mut state = local_navigation_state(false);
+            let mut state = local_navigation_state();
             let pending_request = request_local_navigation(&mut state, 2);
             assert_local_highlight(&mut state, "ws_3");
             preview_key(&mut state, &[0x02]);
@@ -874,7 +878,7 @@ fn direct_agent_focus_repaints_when_releasing_a_workspace_highlight() {
     projected.agents.push(agent("agent", AgentStatus::Idle, 1));
 
     for pending in [false, true] {
-        let mut state = local_navigation_state(false);
+        let mut state = local_navigation_state();
         state.config.keybinds = ClientShellConfig::from_config(&config).keybinds;
         state.set_snapshot(Box::new(projected.clone()));
         state.compose(100, 28).unwrap();
@@ -902,7 +906,7 @@ fn direct_agent_focus_repaints_when_releasing_a_workspace_highlight() {
 
 #[test]
 fn cancelled_close_does_not_restore_an_older_navigation_highlight() {
-    let mut state = local_navigation_state(false);
+    let mut state = local_navigation_state();
     request_local_navigation(&mut state, 2);
     state.open_confirm_close_overlay("ws_1".into());
     preview_key(&mut state, b"\x1b");
@@ -914,7 +918,7 @@ fn cancelled_close_does_not_restore_an_older_navigation_highlight() {
 
 #[test]
 fn coalesced_navigation_focus_does_not_leave_a_permanent_highlight() {
-    let mut state = local_navigation_state(false);
+    let mut state = local_navigation_state();
     let before_request = std::time::Instant::now();
     let request_id = request_local_navigation(&mut state, 2);
     state.handle_endpoint_result(
@@ -934,7 +938,7 @@ fn coalesced_navigation_focus_does_not_leave_a_permanent_highlight() {
 
 #[test]
 fn navigation_highlight_ends_for_noop_focus_and_focused_creation() {
-    let mut state = local_navigation_state(false);
+    let mut state = local_navigation_state();
     request_local_navigation(&mut state, 0);
     assert!(state.pending_workspace_highlight.is_none());
     set_local_focus(&mut state, "ws_2", 2);
@@ -959,7 +963,7 @@ fn navigation_highlight_ends_for_noop_focus_and_focused_creation() {
                 env: Default::default(),
             }),
         ] {
-            let mut state = local_navigation_state(false);
+            let mut state = local_navigation_state();
             request_local_navigation(&mut state, 2);
             let mut outcome = ClientShellInput::default();
             state.push_endpoint_method(method, &mut outcome);
@@ -975,7 +979,7 @@ const KITTY_CTRL_SHIFT_BRACKET: &[u8] = b"\x1b[91;6u";
 
 #[test]
 fn kitty_ctrl_bracket_leaves_navigation_like_esc() {
-    let mut state = local_navigation_state(false);
+    let mut state = local_navigation_state();
     enter_navigation(&mut state);
     preview_key(&mut state, b"\x1b[B");
 
@@ -1003,7 +1007,7 @@ fn configured_ctrl_bracket_navigate_binding_wins_over_cancel() {
 
 #[test]
 fn kitty_ctrl_shift_bracket_keeps_navigation_open() {
-    let mut state = local_navigation_state(false);
+    let mut state = local_navigation_state();
     enter_navigation(&mut state);
 
     state.handle_input_bytes(KITTY_CTRL_SHIFT_BRACKET);

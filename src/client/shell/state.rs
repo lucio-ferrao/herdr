@@ -85,6 +85,7 @@ pub(super) enum ClientMobileTarget {
 pub(super) struct ShellHitMap {
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
+    pub(super) workspace_toggles: Vec<(Rect, String)>,
     pub(super) workspace_body: Rect,
     pub(super) workspace_scrollbar: Rect,
     pub(super) workspace_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -237,6 +238,8 @@ pub(super) struct WorkspaceHit {
     pub(super) workspace_id: String,
     pub(super) indented: bool,
     pub(super) group_toggle: Option<(Rect, String)>,
+    /// The row below the space and the agents listed under it.
+    pub(super) block_bottom: u16,
 }
 
 #[derive(Debug)]
@@ -882,6 +885,7 @@ pub(crate) struct ClientShellState {
     pub(super) tab_press: Option<ClientTabPress>,
     pub(super) collapsed_groups: HashSet<String>,
     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
+    pub(super) collapsed_workspaces: HashSet<String>,
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
     pub(super) pending_agent_reveal: Option<(ClientEndpointId, String)>,
@@ -1056,6 +1060,7 @@ impl ClientShellState {
             tab_press: None,
             collapsed_groups: preferences.collapsed_groups.into_iter().collect(),
             remote_collapsed_groups,
+            collapsed_workspaces: preferences.collapsed_workspaces.into_iter().collect(),
             workspace_scroll: 0,
             agent_scroll: 0,
             pending_agent_reveal: None,
@@ -1209,6 +1214,19 @@ impl ClientShellState {
             return;
         }
         let target = self.snapshot.as_deref().and_then(|snapshot| {
+            if self.endpoints.len() <= 1 && !self.sidebar_collapsed && !self.mobile_layout_active()
+            {
+                // the expanded sidebar lists agents between the spaces
+                let empty_collapsed_groups = HashSet::new();
+                let items = render::sidebar_items(
+                    snapshot,
+                    &self.config,
+                    self.collapsed_groups_for_endpoint(&self.active_endpoint_id)
+                        .unwrap_or(&empty_collapsed_groups),
+                    &self.collapsed_workspaces,
+                );
+                return render::sidebar_item_position(&items, snapshot, workspace_id);
+            }
             self.navigation_workspace_entries(snapshot)
                 .iter()
                 .position(|entry| snapshot.workspaces[entry.index].workspace_id == workspace_id)
