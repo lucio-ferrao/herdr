@@ -85,7 +85,6 @@ pub(super) enum ClientMobileTarget {
 pub(super) struct ShellHitMap {
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
-    pub(super) workspace_toggles: Vec<(Rect, String)>,
     pub(super) workspace_body: Rect,
     pub(super) workspace_scrollbar: Rect,
     pub(super) workspace_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -176,6 +175,8 @@ pub(super) struct ClientPaneMouseGesture {
 pub(super) struct ClientWorkspacePress {
     pub(super) endpoint_id: ClientEndpointId,
     pub(super) workspace_id: String,
+    pub(super) pane_id: Option<String>,
+    pub(super) toggles: bool,
     pub(super) start_column: u16,
     pub(super) start_row: u16,
 }
@@ -240,6 +241,10 @@ pub(super) struct WorkspaceHit {
     pub(super) group_toggle: Option<(Rect, String)>,
     /// The row below the space and the agents listed under it.
     pub(super) block_bottom: u16,
+    /// The space's only agent, which a click focuses instead of the space.
+    pub(super) pane_id: Option<String>,
+    /// A click expands or collapses the agents listed under the space.
+    pub(super) toggles: bool,
 }
 
 #[derive(Debug)]
@@ -886,6 +891,9 @@ pub(crate) struct ClientShellState {
     pub(super) collapsed_groups: HashSet<String>,
     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
     pub(super) collapsed_workspaces: HashSet<String>,
+    /// The spinner frame of working agents in the expanded sidebar, and when it last moved.
+    pub(super) working_frame: usize,
+    pub(super) working_frame_at: Option<std::time::Instant>,
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
     pub(super) pending_agent_reveal: Option<(ClientEndpointId, String)>,
@@ -1061,6 +1069,8 @@ impl ClientShellState {
             collapsed_groups: preferences.collapsed_groups.into_iter().collect(),
             remote_collapsed_groups,
             collapsed_workspaces: preferences.collapsed_workspaces.into_iter().collect(),
+            working_frame: 0,
+            working_frame_at: None,
             workspace_scroll: 0,
             agent_scroll: 0,
             pending_agent_reveal: None,
@@ -1878,6 +1888,32 @@ impl ClientShellState {
         self.endpoint_error_deadline = Some(
             std::time::Instant::now() + std::time::Duration::from_secs(ENDPOINT_ERROR_TIMEOUT_SECS),
         );
+    }
+
+    /// Moves the working spinner while the sidebar lists a working agent.
+    pub(crate) fn tick_working_spinner(&mut self, now: std::time::Instant) -> bool {
+        const INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+        let animating = self.endpoints.len() <= 1
+            && !self.mobile_layout_active()
+            && self.snapshot.as_deref().is_some_and(|snapshot| {
+                snapshot
+                    .agents
+                    .iter()
+                    .any(|agent| agent.agent_status == crate::api::schema::AgentStatus::Working)
+            });
+        if !animating {
+            self.working_frame_at = None;
+            return false;
+        }
+        if self
+            .working_frame_at
+            .is_some_and(|at| now.saturating_duration_since(at) < INTERVAL)
+        {
+            return false;
+        }
+        self.working_frame = self.working_frame.wrapping_add(1);
+        self.working_frame_at = Some(now);
+        true
     }
 
     pub(crate) fn tick_endpoint_error(&mut self, now: std::time::Instant) -> bool {

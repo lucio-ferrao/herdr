@@ -724,8 +724,11 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("needs input"), "frame: {text}");
-    assert!(!text.contains("×"), "states are words, not symbols: {text}");
+    assert!(
+        text.lines()
+            .any(|line| line.contains("pi two") && line.trim_end().ends_with("● │")),
+        "asking marks the agent on the right: {text}"
+    );
     assert!(text.contains("pi two"), "frame: {text}");
     assert!(text.contains("waiting"), "frame: {text}");
     assert_eq!(
@@ -797,6 +800,12 @@ fn muted_agent_sidebar_rows_do_not_stack_terminal_faint() {
         tokens: Vec::new(),
         focused: true,
     }];
+    // a second agent, so the space lists them under it
+    projected.agents.push(ClientShellAgent {
+        pane_id: "pane_2".into(),
+        focused: false,
+        ..projected.agents[0].clone()
+    });
     let mut config = Config::default();
     config.ui.sidebar_width = 34;
     config.ui.sidebar.agents.rows = vec![vec![
@@ -838,7 +847,7 @@ fn workspace_state_text_does_not_stack_terminal_faint() {
     let frame = state.compose(106, 30).expect("workspace sidebar frame");
     let rect = state.hits.workspaces.first().expect("workspace hit").rect;
     let buffer = frame.to_ratatui_buffer().expect("workspace sidebar buffer");
-    let (x, y) = cell_symbol_position(&frame, rect, "working");
+    let (x, y) = cell_symbol_position(&frame, rect, "⠋");
     let cell = buffer.cell((x, y)).expect("workspace state text cell");
     assert!(
         !cell.modifier.contains(Modifier::DIM),

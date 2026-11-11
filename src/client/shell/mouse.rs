@@ -511,7 +511,7 @@ impl ClientShellState {
     fn workspace_drop_target_at(&self, point: (u16, u16)) -> Option<(Option<String>, u16)> {
         if self.hits.workspace_body.height == 0
             || point.1 < self.hits.workspace_body.y.saturating_sub(1)
-            || point.1 >= self.hits.new_workspace.y
+            || point.1 >= self.hits.workspace_body.bottom()
             || self.hits.workspaces.iter().any(|hit| {
                 hit.endpoint_id != self.active_endpoint_id && super::contains(hit.rect, point)
             })
@@ -573,7 +573,7 @@ impl ClientShellState {
                     .map(|workspace| workspace.workspace_id.clone())
             });
             let row = last_hit.block_bottom;
-            if row < self.hits.new_workspace.y {
+            if row < self.hits.workspace_body.bottom() {
                 slots.push((before, row));
             }
         }
@@ -2118,20 +2118,6 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
-                let workspace_toggle = self
-                    .hits
-                    .workspace_toggles
-                    .iter()
-                    .find(|(rect, _)| super::contains(*rect, point))
-                    .map(|(_, workspace_id)| workspace_id.clone());
-                if let Some(workspace_id) = workspace_toggle {
-                    if !self.collapsed_workspaces.remove(&workspace_id) {
-                        self.collapsed_workspaces.insert(workspace_id);
-                    }
-                    outcome.repaint = true;
-                    self.persist_chrome_preferences(outcome);
-                    return;
-                }
                 let group_toggle = self.hits.workspaces.iter().find_map(|hit| {
                     let (rect, key) = hit.group_toggle.as_ref()?;
                     super::contains(*rect, point).then(|| (hit.endpoint_id.clone(), key.clone()))
@@ -2150,6 +2136,8 @@ impl ClientShellState {
                     .map(|hit| ClientWorkspacePress {
                         endpoint_id: hit.endpoint_id.clone(),
                         workspace_id: hit.workspace_id.clone(),
+                        pane_id: hit.pane_id.clone(),
+                        toggles: hit.toggles,
                         start_column: mouse.column,
                         start_row: mouse.row,
                     });

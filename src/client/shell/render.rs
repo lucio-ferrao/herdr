@@ -7,7 +7,6 @@ pub(in crate::client::shell) mod sidebar;
 #[path = "../shell/tabs.rs"]
 mod tabs;
 
-pub(super) use super::agent_sidebar::ordered_agent_pane_ids;
 pub(super) use super::aggregate_navigation::navigator_rows as client_navigator_rows;
 pub(super) use overlays::{render_client_overlay, render_context_menu, render_global_menu};
 pub(super) use sidebar::{
@@ -240,6 +239,7 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) collapsed_groups: &'a HashSet<String>,
     pub(super) remote_collapsed_groups: &'a HashMap<ClientEndpointId, HashSet<String>>,
     pub(super) collapsed_workspaces: &'a HashSet<String>,
+    pub(super) working_frame: usize,
     pub(super) workspace_scroll: &'a mut usize,
     pub(super) agent_scroll: &'a mut usize,
     pub(super) tab_scroll: &'a mut usize,
@@ -300,6 +300,8 @@ pub(super) fn render_shell(
                 state
                     .selected_workspace_id
                     .map(|target| target.workspace_id.as_str()),
+                state.collapsed_workspaces,
+                state.working_frame,
                 &mut hits,
             );
         } else {
@@ -334,7 +336,6 @@ pub(super) fn render_shell(
         hits.new_workspace = Rect::default();
         hits.machines.clear();
         hits.workspaces.clear();
-        hits.workspace_toggles.clear();
         hits.agents.clear();
         hits.endpoint_agents.clear();
         hits.tab_scroll_left = Rect::default();

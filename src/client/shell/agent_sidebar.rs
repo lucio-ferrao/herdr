@@ -14,8 +14,6 @@ pub(super) struct AgentRow {
     pub(super) pane_id: String,
     pub(super) workspace_id: String,
     pub(super) status: crate::api::schema::AgentStatus,
-    /// The state as the agent names it, defaulting to herdr's words.
-    pub(super) state_text: String,
     pub(super) focused: bool,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
 }
@@ -272,7 +270,6 @@ pub(super) fn agent_row(
         pane_id: agent.pane_id.clone(),
         workspace_id: agent.workspace_id.clone(),
         status: agent.agent_status,
-        state_text: state_text.to_owned(),
         focused: agent.focused,
         rows,
     })

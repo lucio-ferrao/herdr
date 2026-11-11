@@ -35,11 +35,19 @@ impl ClientShellState {
         press: ClientWorkspacePress,
         outcome: &mut ClientShellInput,
     ) {
-        self.focus_or_activate(
-            press.endpoint_id,
-            ClientEndpointFocusTarget::Workspace(press.workspace_id),
-            outcome,
-        );
+        if press.toggles {
+            if !self.collapsed_workspaces.remove(&press.workspace_id) {
+                self.collapsed_workspaces.insert(press.workspace_id);
+            }
+            outcome.repaint = true;
+            self.persist_chrome_preferences(outcome);
+            return;
+        }
+        let target = match press.pane_id {
+            Some(pane_id) => ClientEndpointFocusTarget::Pane(pane_id),
+            None => ClientEndpointFocusTarget::Workspace(press.workspace_id),
+        };
+        self.focus_or_activate(press.endpoint_id, target, outcome);
     }
 
     pub(super) fn handle_endpoint_machine_click(

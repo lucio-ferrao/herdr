@@ -193,6 +193,8 @@ pub(super) fn render_collapsed(
                 indented: false,
                 group_toggle: None,
                 block_bottom: rect.bottom(),
+                pane_id: None,
+                toggles: false,
             });
             y = y.saturating_add(1);
         }
@@ -505,6 +507,8 @@ pub(super) fn render_expanded(
                     indented: entry.indented,
                     group_toggle,
                     block_bottom: rect.bottom(),
+                    pane_id: None,
+                    toggles: false,
                 });
                 y = y
                     .saturating_add(height)
