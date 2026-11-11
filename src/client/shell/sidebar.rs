@@ -317,7 +317,7 @@ fn sidebar_workspace_rows(
     (status, rows)
 }
 
-fn sidebar_item_height(
+pub(in crate::client::shell) fn sidebar_item_height(
     item: &SidebarItem,
     snapshot: &ClientShellSnapshot,
     collapsed_groups: &HashSet<String>,
@@ -336,7 +336,7 @@ fn sidebar_item_height(
     lines.max(1).min(u16::MAX as usize) as u16
 }
 
-fn sidebar_item_gap(
+pub(in crate::client::shell) fn sidebar_item_gap(
     current: &SidebarItem,
     next: Option<&SidebarItem>,
     config: &ClientShellConfig,
@@ -354,7 +354,10 @@ const WORKING_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 
 /// The state mark of a sidebar line: a braille spinner while working, a check when done,
 /// a dot while asking; idle needs no mark.
-fn status_mark(status: crate::api::schema::AgentStatus, frame: usize) -> Option<&'static str> {
+pub(in crate::client::shell) fn status_mark(
+    status: crate::api::schema::AgentStatus,
+    frame: usize,
+) -> Option<&'static str> {
     use crate::api::schema::AgentStatus;
     match status {
         AgentStatus::Blocked => Some("●"),
@@ -374,6 +377,141 @@ pub(in crate::client::shell) fn sidebar_item_position(
         matches!(item, SidebarItem::Workspace { entry, .. }
             if snapshot.workspaces[entry.index].workspace_id == workspace_id)
     })
+}
+
+/// Draws one line of the expanded list: a space, or an agent under it. Without `collapsed_groups`
+/// worktree groups cannot fold, and their parents get no toggle; the toggle drawn is returned.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::client::shell) fn render_sidebar_item(
+    buffer: &mut Buffer,
+    rect: Rect,
+    item: &SidebarItem,
+    snapshot: &ClientShellSnapshot,
+    config: &ClientShellConfig,
+    collapsed_groups: Option<&HashSet<String>>,
+    selected: bool,
+    dragged: bool,
+    navigating: bool,
+    working_frame: usize,
+) -> Option<(Rect, String)> {
+    let palette = &config.palette;
+    match item {
+        SidebarItem::Workspace {
+            entry,
+            has_agents,
+            collapsed,
+            agent,
+        } => {
+            let workspace = snapshot.workspaces.get(entry.index)?;
+            let no_groups = HashSet::new();
+            let (status, rows) = sidebar_workspace_rows(
+                snapshot,
+                workspace,
+                entry,
+                collapsed_groups.unwrap_or(&no_groups),
+                config,
+            );
+            // the focused agent marks where you are; the space itself is not highlighted
+            if selected {
+                buffer.set_style(rect, Style::default().bg(palette.selection_bg));
+            } else if dragged {
+                buffer.set_style(rect, Style::default().bg(palette.surface1));
+            }
+            // an expanded space leaves its state to its agents; a lone agent's is the space's
+            let mark = match agent {
+                Some(agent) => {
+                    status_mark(agent.status, working_frame).map(|mark| (mark, agent.status))
+                }
+                None if *has_agents && !*collapsed => None,
+                None => status_mark(status, working_frame).map(|mark| (mark, status)),
+            };
+            let agent_focused = agent.as_ref().is_some_and(|agent| agent.focused);
+            // one column on the right, a column clear of the separator and before a worktree
+            // group's toggle: the state, or else the expand toggle of a space with agents under it
+            let slot = rect.right().saturating_sub(2).saturating_sub(
+                if collapsed_groups.is_some() && parent_group_key(snapshot, entry.index).is_some() {
+                    2
+                } else {
+                    0
+                },
+            );
+            let nested = Rect::new(
+                rect.x,
+                rect.y,
+                slot.saturating_sub(1).saturating_sub(rect.x),
+                rect.height,
+            );
+            render_workspace_rows(
+                buffer,
+                nested,
+                status,
+                config.status_indicators,
+                entry,
+                rows,
+                agent_focused,
+                selected,
+                navigating,
+                dragged,
+                palette,
+            );
+            // the right columns share the row's background
+            if !nested.is_empty() {
+                for y in rect.y..rect.bottom() {
+                    let background = buffer[(nested.x, y)].bg;
+                    for x in nested.right()..rect.right() {
+                        buffer[(x, y)].set_bg(background);
+                    }
+                }
+            }
+            let symbol = match mark {
+                Some((mark, mark_status)) => Some((
+                    mark,
+                    Style::default().fg(status_color(mark_status, palette)),
+                )),
+                None if *has_agents => Some((
+                    if *collapsed { "⏵" } else { "⏷" },
+                    Style::default().fg(palette.overlay0),
+                )),
+                None => None,
+            };
+            if let Some((symbol, style)) = symbol {
+                put_text(buffer, slot, rect.y, 1, symbol, style);
+            }
+            collapsed_groups.and_then(|groups| {
+                render_parent_group_toggle(buffer, rect, snapshot, entry.index, groups, palette)
+            })
+        }
+        SidebarItem::Agent { indented, row } => {
+            if row.focused {
+                buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+            }
+            // three columns in from the space, or past a worktree child's tree lines
+            let indent = if *indented { 7 } else { 2 };
+            super::agent_sidebar::render_agent_row(
+                buffer,
+                Rect::new(
+                    rect.x.saturating_add(indent),
+                    rect.y,
+                    rect.width.saturating_sub(indent + 3),
+                    rect.height,
+                ),
+                row,
+                config,
+            );
+            // the state lines up with the spaces' column on the right
+            if let Some(mark) = status_mark(row.status, working_frame) {
+                put_text(
+                    buffer,
+                    rect.right().saturating_sub(2),
+                    rect.y,
+                    1,
+                    mark,
+                    Style::default().fg(status_color(row.status, palette)),
+                );
+            }
+            None
+        }
+    }
 }
 
 pub(crate) fn render_sidebar(
@@ -481,95 +619,27 @@ pub(crate) fn render_sidebar(
             SidebarItem::Workspace {
                 entry,
                 has_agents,
-                collapsed,
                 agent,
+                ..
             } => {
                 let Some(workspace) = snapshot.workspaces.get(entry.index) else {
                     continue;
                 };
-                let (status, rows) = sidebar_workspace_rows(
-                    snapshot,
-                    workspace,
-                    entry,
-                    state.collapsed_groups,
-                    config,
-                );
                 let selected = state.selected_workspace_id.is_some_and(|target| {
                     target.matches(state.active_endpoint_id, &workspace.workspace_id)
                 });
                 let dragged = state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
-                // the focused agent marks where you are; the space itself is not highlighted
-                if selected {
-                    buffer.set_style(rect, Style::default().bg(palette.selection_bg));
-                } else if dragged {
-                    buffer.set_style(rect, Style::default().bg(palette.surface1));
-                }
-                // an expanded space leaves its state to its agents; a lone agent's is the space's
-                let mark = match agent {
-                    Some(agent) => status_mark(agent.status, state.working_frame)
-                        .map(|mark| (mark, agent.status)),
-                    None if *has_agents && !*collapsed => None,
-                    None => status_mark(status, state.working_frame).map(|mark| (mark, status)),
-                };
-                let agent_focused = agent.as_ref().is_some_and(|agent| agent.focused);
-                // one column on the right, a column clear of the separator and before a worktree
-                // group's toggle: the state, or else the expand toggle of a space with agents under it
-                let slot = rect.right().saturating_sub(2).saturating_sub(
-                    if parent_group_key(snapshot, entry.index).is_some() {
-                        2
-                    } else {
-                        0
-                    },
-                );
-                let nested = Rect::new(
-                    rect.x,
-                    rect.y,
-                    slot.saturating_sub(1).saturating_sub(rect.x),
-                    rect.height,
-                );
-                render_workspace_rows(
-                    buffer,
-                    nested,
-                    status,
-                    config.status_indicators,
-                    entry,
-                    rows,
-                    agent_focused,
-                    selected,
-                    state.selected_workspace_id.is_some(),
-                    dragged,
-                    palette,
-                );
-                // the right columns share the row's background
-                if !nested.is_empty() {
-                    for y in rect.y..rect.bottom() {
-                        let background = buffer[(nested.x, y)].bg;
-                        for x in nested.right()..rect.right() {
-                            buffer[(x, y)].set_bg(background);
-                        }
-                    }
-                }
-                let symbol = match mark {
-                    Some((mark, mark_status)) => Some((
-                        mark,
-                        Style::default().fg(status_color(mark_status, palette)),
-                    )),
-                    None if *has_agents => Some((
-                        if *collapsed { "⏵" } else { "⏷" },
-                        Style::default().fg(palette.overlay0),
-                    )),
-                    None => None,
-                };
-                if let Some((symbol, style)) = symbol {
-                    put_text(buffer, slot, rect.y, 1, symbol, style);
-                }
-                let group_toggle = render_parent_group_toggle(
+                let group_toggle = render_sidebar_item(
                     buffer,
                     rect,
+                    item,
                     snapshot,
-                    entry.index,
-                    state.collapsed_groups,
-                    palette,
+                    config,
+                    Some(state.collapsed_groups),
+                    selected,
+                    dragged,
+                    state.selected_workspace_id.is_some(),
+                    state.working_frame,
                 );
                 hits.workspaces.push(WorkspaceHit {
                     rect,
@@ -582,34 +652,19 @@ pub(crate) fn render_sidebar(
                     toggles: *has_agents,
                 });
             }
-            SidebarItem::Agent { indented, row } => {
-                if row.focused {
-                    buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
-                }
-                // three columns in from the space, or past a worktree child's tree lines
-                let indent = if *indented { 7 } else { 2 };
-                super::agent_sidebar::render_agent_row(
+            SidebarItem::Agent { row, .. } => {
+                render_sidebar_item(
                     buffer,
-                    Rect::new(
-                        rect.x.saturating_add(indent),
-                        rect.y,
-                        rect.width.saturating_sub(indent + 3),
-                        rect.height,
-                    ),
-                    row,
+                    rect,
+                    item,
+                    snapshot,
                     config,
+                    Some(state.collapsed_groups),
+                    false,
+                    false,
+                    false,
+                    state.working_frame,
                 );
-                // the state lines up with the spaces' column on the right
-                if let Some(mark) = status_mark(row.status, state.working_frame) {
-                    put_text(
-                        buffer,
-                        rect.right().saturating_sub(2),
-                        rect.y,
-                        1,
-                        mark,
-                        Style::default().fg(status_color(row.status, palette)),
-                    );
-                }
                 hits.agents.push((rect, row.pane_id.clone()));
                 if let Some(space) = hits.workspaces.last_mut() {
                     space.block_bottom = rect.bottom();

@@ -253,7 +253,6 @@ fn mobile_header_and_switcher_render_released_sections_and_stable_targets() {
     for expected in [
         "switch",
         "close",
-        "agents",
         "spaces",
         "+ new workspace",
         "tabs",
@@ -264,34 +263,13 @@ fn mobile_header_and_switcher_render_released_sections_and_stable_targets() {
     ] {
         assert!(switcher_text.contains(expected), "missing {expected}");
     }
-    let workspace_hit = state
-        .hits
-        .mobile_targets
-        .iter()
-        .find_map(|(rect, target)| {
-            matches!(
-                target,
-                ClientMobileTarget::Workspace { workspace_id, .. } if workspace_id == "ws_1"
-            )
-            .then_some(*rect)
-        })
-        .expect("workspace hit");
-    let focused = state.handle_raw_events(vec![click(workspace_hit)]);
-    assert_eq!(state.mode, ClientShellMode::Terminal);
-    assert!(state.navigate_workspace_id.is_none());
-    assert!(focused.actions.iter().any(|action| matches!(
-        action,
-        ClientShellAction::Endpoint { request, .. }
-            if matches!(
-                &request.method,
-                crate::api::schema::Method::WorkspaceFocus(params)
-                    if params.workspace_id == "ws_1"
-            )
-    )));
-
-    state.compose(44, 20).expect("restored mobile header");
-    state.handle_raw_events(vec![click(state.hits.mobile_switch)]);
-    state.compose(44, 20).expect("agent switcher");
+    // the space's only agent shares its line, and a tap focuses the agent
+    assert!(
+        !state.hits.mobile_targets.iter().any(|(_, target)| matches!(
+            target,
+            ClientMobileTarget::Workspace { workspace_id, .. } if workspace_id == "ws_1"
+        ))
+    );
     let agent_hit = state
         .hits
         .mobile_targets
@@ -305,6 +283,8 @@ fn mobile_header_and_switcher_render_released_sections_and_stable_targets() {
         })
         .expect("agent hit");
     let focused = state.handle_raw_events(vec![click(agent_hit)]);
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert!(state.navigate_workspace_id.is_none());
     assert!(focused.actions.iter().any(|action| matches!(
         action,
         ClientShellAction::Endpoint { request, .. }
@@ -346,7 +326,111 @@ fn mobile_header_and_switcher_render_released_sections_and_stable_targets() {
 }
 
 #[test]
-fn mobile_background_workspace_uses_its_own_active_tab_status() {
+fn mobile_switcher_lists_agents_under_their_space_as_the_sidebar_does() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut projected = snapshot();
+    for (pane_id, status) in [
+        ("pane_1", AgentStatus::Blocked),
+        ("pane_2", AgentStatus::Idle),
+    ] {
+        projected.agents.push(ClientShellAgent {
+            pane_id: pane_id.into(),
+            workspace_id: "ws_1".into(),
+            tab_id: "tab_1".into(),
+            name: Some("pi".into()),
+            display_agent: Some("pi".into()),
+            agent: Some("pi".into()),
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: status,
+            state_change_seq: 1,
+            state_labels: Vec::new(),
+            tokens: Vec::new(),
+            focused: pane_id == "pane_1",
+        });
+    }
+    projected.workspaces[0].agent_status = AgentStatus::Blocked;
+    projected.workspaces.push(ClientShellWorkspace {
+        workspace_id: "ws_2".into(),
+        active_tab_id: "tab_2".into(),
+        new_workspace_cwd: "/other".into(),
+        number: 2,
+        label: "other".into(),
+        custom_label: true,
+        branch: None,
+        git_ahead_behind: None,
+        tokens: Vec::new(),
+        worktree: None,
+        focused: false,
+        agent_status: AgentStatus::Idle,
+    });
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.mode = ClientShellMode::Navigate;
+    let frame = state.compose(44, 20).expect("mobile switcher");
+    let rows = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    fn target_row(state: &ClientShellState, wanted: &ClientMobileTarget) -> Option<usize> {
+        state
+            .hits
+            .mobile_targets
+            .iter()
+            .find(|(_, target)| target == wanted)
+            .map(|(rect, _)| rect.y as usize)
+    }
+    let space = target_row(&state, &ClientMobileTarget::ToggleWorkspace("ws_1".into()))
+        .expect("a space with two agents toggles");
+    let agent = |pane_id: &str| ClientMobileTarget::Agent {
+        endpoint_id: ClientEndpointId::Local,
+        pane_id: pane_id.into(),
+    };
+    let blocked = target_row(&state, &agent("pane_1")).expect("first agent under the space");
+    let idle = target_row(&state, &agent("pane_2")).expect("second agent under the space");
+    assert_eq!((blocked, idle), (space + 1, space + 2));
+    assert!(rows[space].contains("client-shell"), "{}", rows[space]);
+    assert!(rows[space].trim_end().ends_with('⏷'), "{}", rows[space]);
+    assert!(rows[blocked].trim_end().ends_with('●'), "{}", rows[blocked]);
+    assert!(!rows[idle].contains('●'), "{}", rows[idle]);
+    assert!(target_row(
+        &state,
+        &ClientMobileTarget::Workspace {
+            endpoint_id: ClientEndpointId::Local,
+            workspace_id: "ws_2".into(),
+        }
+    )
+    .is_some());
+    assert!(!rows.iter().any(|row| row.contains(" agents ")));
+
+    // a tap on the space folds its agents and keeps the list open
+    let toggled =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: space as u16,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(toggled.repaint);
+    assert_eq!(state.mode, ClientShellMode::Navigate);
+    assert!(state.collapsed_workspaces.contains("ws_1"));
+    let frame = state.compose(44, 20).expect("folded space");
+    let row = frame.cells[space * frame.width as usize..(space + 1) * frame.width as usize]
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect::<String>();
+    assert!(row.trim_end().ends_with('●'), "{row}");
+    assert!(target_row(&state, &agent("pane_1")).is_none());
+}
+
+#[test]
+fn mobile_tabs_are_numbered_by_position() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     let mut projected = snapshot();
     projected.tabs.push(ClientShellTab {
@@ -400,7 +484,6 @@ fn mobile_background_workspace_uses_its_own_active_tab_status() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("feature · tab two · 2/2"), "{text}");
     assert!(text.contains("2 · logs"), "{text}");
     assert!(!text.contains("7 · logs"), "{text}");
 }
@@ -597,7 +680,7 @@ fn mobile_previous_workspace_action_wraps_across_expanded_entries() {
 fn mobile_switcher_scroll_close_and_width_transition_clear_mobile_hits() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     let mut projected = snapshot();
-    for index in 2..=8 {
+    for index in 2..=12 {
         projected.workspaces.push(ClientShellWorkspace {
             workspace_id: format!("ws_{index}"),
             active_tab_id: format!("tab_{index}"),
@@ -633,7 +716,7 @@ fn mobile_switcher_scroll_close_and_width_transition_clear_mobile_hits() {
     assert_eq!(state.mobile_switcher_scroll, 2);
     state.compose(44, 10).expect("wheel position stays stable");
     assert_eq!(state.mobile_switcher_scroll, 2);
-    for _ in 0..7 {
+    for _ in 0..11 {
         state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
             KeyCode::Down,
             KeyModifiers::empty(),
@@ -642,13 +725,13 @@ fn mobile_switcher_scroll_close_and_width_transition_clear_mobile_hits() {
     state.compose(44, 10).expect("revealed mobile selection");
     assert_eq!(
         state.navigate_workspace_id,
-        state.navigation_target(&ClientEndpointId::Local, "ws_8")
+        state.navigation_target(&ClientEndpointId::Local, "ws_12")
     );
     assert!(state.mobile_switcher_scroll > 2);
     assert!(state.hits.mobile_targets.iter().any(|(_, target)| {
         matches!(
             target,
-            ClientMobileTarget::Workspace { workspace_id, .. } if workspace_id == "ws_8"
+            ClientMobileTarget::Workspace { workspace_id, .. } if workspace_id == "ws_12"
         )
     }));
     let close = state.hits.mobile_close;

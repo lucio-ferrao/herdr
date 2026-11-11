@@ -78,6 +78,8 @@ pub(super) enum ClientMobileTarget {
         endpoint_id: ClientEndpointId,
         pane_id: String,
     },
+    /// Expands or collapses the agents listed under a space.
+    ToggleWorkspace(String),
     Menu(usize),
 }
 
@@ -891,7 +893,7 @@ pub(crate) struct ClientShellState {
     pub(super) collapsed_groups: HashSet<String>,
     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
     pub(super) collapsed_workspaces: HashSet<String>,
-    /// The spinner frame of working agents in the expanded sidebar, and when it last moved.
+    /// The spinner frame of working agents in the sidebar and the mobile view, and when it last moved.
     pub(super) working_frame: usize,
     pub(super) working_frame_at: Option<std::time::Instant>,
     pub(super) workspace_scroll: usize,
@@ -1890,11 +1892,10 @@ impl ClientShellState {
         );
     }
 
-    /// Moves the working spinner while the sidebar lists a working agent.
+    /// Moves the working spinner of the sidebar and of the mobile header and list while an agent works.
     pub(crate) fn tick_working_spinner(&mut self, now: std::time::Instant) -> bool {
         const INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
         let animating = self.endpoints.len() <= 1
-            && !self.mobile_layout_active()
             && self.snapshot.as_deref().is_some_and(|snapshot| {
                 snapshot
                     .agents

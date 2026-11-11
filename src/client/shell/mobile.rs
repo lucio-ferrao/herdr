@@ -6,18 +6,36 @@ use ratatui::{
     widgets::{Clear, Paragraph, Widget},
 };
 
+use super::render::sidebar::{status_mark, SidebarItem};
 use super::render::{display_width, put_segment, put_text};
 use super::*;
 
 const MOBILE_BUTTON_WIDTH: u16 = 10;
 
+#[derive(Default)]
 struct MobileItem {
     lines: Vec<Line<'static>>,
+    /// A line of the sidebar's list, drawn as the sidebar draws it.
+    sidebar: Option<MobileSidebarLine>,
     background: Color,
     target: Option<ClientMobileTarget>,
+    /// The space the item shows, revealed when it is selected.
+    workspace: Option<(ClientEndpointId, String)>,
+}
+
+struct MobileSidebarLine {
+    item: SidebarItem,
+    height: u16,
+    selected: bool,
 }
 
 impl MobileItem {
+    fn height(&self) -> usize {
+        self.sidebar
+            .as_ref()
+            .map_or(self.lines.len(), |line| usize::from(line.height))
+    }
+
     fn section(label: impl Into<String>, palette: &Palette) -> Self {
         Self {
             lines: vec![Line::from(Span::styled(
@@ -28,7 +46,7 @@ impl MobileItem {
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             ))],
             background: palette.panel_bg,
-            target: None,
+            ..Default::default()
         }
     }
 
@@ -43,6 +61,7 @@ impl MobileItem {
             ))],
             background: palette.panel_bg,
             target: Some(target),
+            ..Default::default()
         }
     }
 }
@@ -52,6 +71,7 @@ pub(super) fn render_mobile_header(
     area: Rect,
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
+    working_frame: usize,
     hits: &mut ShellHitMap,
 ) {
     if area.is_empty() {
@@ -69,7 +89,7 @@ pub(super) fn render_mobile_header(
     hits.mobile_switch = button;
     let status_width = button.x.saturating_sub(area.x).saturating_sub(1);
     let status = Rect::new(area.x, area.y, status_width, area.height);
-    render_header_status(buffer, status, snapshot, config);
+    render_header_status(buffer, status, snapshot, config, working_frame);
     render_header_button(buffer, button, snapshot, config);
 }
 
@@ -78,6 +98,7 @@ fn render_header_status(
     area: Rect,
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
+    working_frame: usize,
 ) {
     if area.is_empty() {
         return;
@@ -109,7 +130,7 @@ fn render_header_status(
         name_width.min(3),
         &format!(
             " {} ",
-            status_icon(workspace.agent_status, config.status_indicators)
+            status_mark(workspace.agent_status, working_frame).unwrap_or(" ")
         ),
         Style::default()
             .fg(status_color(workspace.agent_status, palette))
@@ -140,6 +161,7 @@ fn render_header_status(
             Rect::new(area.x, area.y + 1, area.width, 1),
             snapshot,
             config,
+            working_frame,
         );
     }
 }
@@ -193,10 +215,7 @@ fn render_header_button(
             area.right().saturating_sub(1),
             area.y,
             1,
-            status_icon(
-                crate::api::schema::AgentStatus::Blocked,
-                config.status_indicators,
-            ),
+            status_mark(crate::api::schema::AgentStatus::Blocked, 0).unwrap_or_default(),
             Style::default().fg(palette.red).bg(palette.surface0),
         );
     }
@@ -238,6 +257,7 @@ fn render_agent_summary(
     area: Rect,
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
+    working_frame: usize,
 ) {
     use crate::api::schema::AgentStatus;
     let counts = [
@@ -293,12 +313,7 @@ fn render_agent_summary(
         if count == 0 {
             continue;
         }
-        let symbol = match (config.status_indicators, status) {
-            (crate::config::StatusIndicatorStyle::Dots, AgentStatus::Blocked) => Some("◉"),
-            (crate::config::StatusIndicatorStyle::Dots, AgentStatus::Done) => Some("●"),
-            (crate::config::StatusIndicatorStyle::Dots, _) => None,
-            _ => Some(status_icon(status, config.status_indicators)),
-        };
+        let symbol = status_mark(status, working_frame);
         let text = symbol.map_or_else(
             || format!("{count} {label}"),
             |symbol| format!("{symbol} {count} {label}"),
@@ -360,6 +375,7 @@ fn render_agent_summary(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_mobile_switcher(
     buffer: &mut Buffer,
     area: Rect,
@@ -368,6 +384,8 @@ pub(super) fn render_mobile_switcher(
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
     selected_workspace_id: Option<&WorkspaceNavigationTarget>,
+    collapsed_workspaces: &HashSet<String>,
+    working_frame: usize,
     scroll: &mut usize,
     reveal_workspace: &mut bool,
     hits: &mut ShellHitMap,
@@ -442,23 +460,24 @@ pub(super) fn render_mobile_switcher(
         active_endpoint_id,
         config,
         selected_workspace_id,
+        collapsed_workspaces,
         viewport.width.saturating_sub(1),
     );
-    let total_rows = items.iter().map(|item| item.lines.len()).sum::<usize>();
+    let total_rows = items.iter().map(MobileItem::height).sum::<usize>();
     let max_scroll = total_rows.saturating_sub(usize::from(viewport.height));
     *scroll = (*scroll).min(max_scroll);
     if *reveal_workspace {
         if let Some(selected_workspace_id) = selected_workspace_id {
             let mut start = 0usize;
             for item in &items {
-                let end = start.saturating_add(item.lines.len());
-                if matches!(
-                    item.target.as_ref(),
-                    Some(ClientMobileTarget::Workspace {
-                        endpoint_id,
-                        workspace_id,
-                    }) if selected_workspace_id.matches(endpoint_id, workspace_id)
-                ) {
+                let end = start.saturating_add(item.height());
+                if item
+                    .workspace
+                    .as_ref()
+                    .is_some_and(|(endpoint_id, workspace_id)| {
+                        selected_workspace_id.matches(endpoint_id, workspace_id)
+                    })
+                {
                     if start < *scroll {
                         *scroll = start;
                     } else if end > (*scroll).saturating_add(usize::from(viewport.height)) {
@@ -496,7 +515,7 @@ pub(super) fn render_mobile_switcher(
     let mut document_row = 0usize;
     for item in items {
         let item_start = document_row;
-        let item_end = item_start.saturating_add(item.lines.len());
+        let item_end = item_start.saturating_add(item.height());
         let visible_start = item_start.max(viewport_start);
         let visible_end = item_end.min(viewport_end);
         if visible_start < visible_end {
@@ -504,17 +523,43 @@ pub(super) fn render_mobile_switcher(
             let height = u16::try_from(visible_end - visible_start).unwrap_or(u16::MAX);
             let rect = Rect::new(content.x, y, content.width, height);
             buffer.set_style(rect, Style::default().bg(item.background));
-            for row in visible_start..visible_end {
-                let line = item.lines[row - item_start].clone();
-                Paragraph::new(line).render(
-                    Rect::new(
-                        content.x,
-                        viewport.y + u16::try_from(row - viewport_start).unwrap_or(u16::MAX),
-                        content.width,
-                        1,
-                    ),
-                    buffer,
+            if let Some(line) = item.sidebar.as_ref() {
+                // drawn whole off screen, then copied in, so a line half scrolled out keeps its look
+                let drawn_area = Rect::new(0, 0, content.width, line.height);
+                let mut drawn = Buffer::empty(drawn_area);
+                drawn.set_style(drawn_area, Style::default().bg(palette.panel_bg));
+                super::render::sidebar::render_sidebar_item(
+                    &mut drawn,
+                    drawn_area,
+                    &line.item,
+                    snapshot,
+                    config,
+                    None,
+                    line.selected,
+                    false,
+                    selected_workspace_id.is_some(),
+                    working_frame,
                 );
+                for row in visible_start..visible_end {
+                    let y = viewport.y + u16::try_from(row - viewport_start).unwrap_or(u16::MAX);
+                    let source = u16::try_from(row - item_start).unwrap_or(u16::MAX);
+                    for x in 0..content.width {
+                        buffer[(content.x + x, y)] = drawn[(x, source)].clone();
+                    }
+                }
+            } else {
+                for row in visible_start..visible_end {
+                    let line = item.lines[row - item_start].clone();
+                    Paragraph::new(line).render(
+                        Rect::new(
+                            content.x,
+                            viewport.y + u16::try_from(row - viewport_start).unwrap_or(u16::MAX),
+                            content.width,
+                            1,
+                        ),
+                        buffer,
+                    );
+                }
             }
             if let Some(target) = item.target {
                 hits.mobile_targets.push((rect, target));
@@ -578,6 +623,7 @@ fn mobile_items(
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
     selected_workspace_id: Option<&WorkspaceNavigationTarget>,
+    collapsed_workspaces: &HashSet<String>,
     content_width: u16,
 ) -> Vec<MobileItem> {
     let palette = &config.palette;
@@ -607,9 +653,187 @@ fn mobile_items(
                 ],
                 background,
                 target: Some(ClientMobileTarget::Machine(endpoint.endpoint_id.clone())),
+                ..Default::default()
             });
         }
     }
+    if endpoints.len() <= 1 {
+        sidebar_list_items(
+            &mut items,
+            snapshot,
+            active_endpoint_id,
+            config,
+            selected_workspace_id,
+            collapsed_workspaces,
+        );
+    } else {
+        machine_list_items(
+            &mut items,
+            snapshot,
+            endpoints,
+            active_endpoint_id,
+            config,
+            selected_workspace_id,
+            content_width,
+        );
+    }
+
+    if let Some(workspace_id) = snapshot.focused_workspace_id.as_deref() {
+        items.push(MobileItem::section("tabs", palette));
+        items.push(MobileItem::action(
+            "  + new tab",
+            ClientMobileTarget::NewTab,
+            palette,
+        ));
+        for (index, tab) in snapshot
+            .tabs
+            .iter()
+            .filter(|tab| tab.workspace_id == workspace_id)
+            .enumerate()
+        {
+            let background = if tab.focused {
+                palette.surface_dim
+            } else {
+                palette.panel_bg
+            };
+            let label = if tab.custom_label {
+                format!("{} · {}", index + 1, tab.label)
+            } else {
+                format!("tab {}", tab.label)
+            };
+            let label = format!(
+                "  {}",
+                crate::ui::truncate_end(&label, usize::from(content_width.saturating_sub(3)),)
+            );
+            items.push(MobileItem {
+                lines: vec![Line::from(Span::styled(
+                    label,
+                    Style::default()
+                        .fg(palette.text)
+                        .bg(background)
+                        .add_modifier(Modifier::BOLD),
+                ))],
+                background,
+                target: Some(ClientMobileTarget::Tab {
+                    endpoint_id: active_endpoint_id.clone(),
+                    tab_id: tab.tab_id.clone(),
+                }),
+                ..Default::default()
+            });
+        }
+    }
+
+    items.push(MobileItem::section("menu", palette));
+    for (index, (label, _)) in super::global_menu::global_menu_items(snapshot)
+        .into_iter()
+        .enumerate()
+    {
+        items.push(MobileItem {
+            lines: vec![Line::from(Span::styled(
+                format!("  {label}"),
+                Style::default().fg(palette.overlay1).bg(palette.panel_bg),
+            ))],
+            background: palette.panel_bg,
+            target: Some(ClientMobileTarget::Menu(index)),
+            ..Default::default()
+        });
+    }
+    items
+}
+
+/// With one machine, the spaces as the sidebar lists them: each with its agents under it, a lone
+/// agent on its space's line, and the state on the right.
+fn sidebar_list_items(
+    items: &mut Vec<MobileItem>,
+    snapshot: &ClientShellSnapshot,
+    active_endpoint_id: &ClientEndpointId,
+    config: &ClientShellConfig,
+    selected_workspace_id: Option<&WorkspaceNavigationTarget>,
+    collapsed_workspaces: &HashSet<String>,
+) {
+    let palette = &config.palette;
+    // worktree groups always show whole here, as before
+    let collapsed_groups = HashSet::new();
+    items.push(MobileItem::section("spaces", palette));
+    let lines =
+        super::render::sidebar_items(snapshot, config, &collapsed_groups, collapsed_workspaces);
+    let gaps = lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            super::render::sidebar::sidebar_item_gap(line, lines.get(index + 1), config)
+        })
+        .collect::<Vec<_>>();
+    for (item, gap) in lines.into_iter().zip(gaps) {
+        let height =
+            super::render::sidebar::sidebar_item_height(&item, snapshot, &collapsed_groups, config);
+        let agent_target = |pane_id: &str| ClientMobileTarget::Agent {
+            endpoint_id: active_endpoint_id.clone(),
+            pane_id: pane_id.to_owned(),
+        };
+        let (target, workspace, selected) = match &item {
+            SidebarItem::Workspace {
+                entry,
+                has_agents,
+                agent,
+                ..
+            } => {
+                let workspace_id = snapshot.workspaces[entry.index].workspace_id.clone();
+                let selected = selected_workspace_id
+                    .is_some_and(|target| target.matches(active_endpoint_id, &workspace_id));
+                let target = match agent {
+                    _ if *has_agents => ClientMobileTarget::ToggleWorkspace(workspace_id.clone()),
+                    Some(agent) => agent_target(&agent.pane_id),
+                    None => ClientMobileTarget::Workspace {
+                        endpoint_id: active_endpoint_id.clone(),
+                        workspace_id: workspace_id.clone(),
+                    },
+                };
+                (
+                    target,
+                    Some((active_endpoint_id.clone(), workspace_id)),
+                    selected,
+                )
+            }
+            SidebarItem::Agent { row, .. } => (agent_target(&row.pane_id), None, false),
+        };
+        items.push(MobileItem {
+            sidebar: Some(MobileSidebarLine {
+                item,
+                height,
+                selected,
+            }),
+            background: palette.panel_bg,
+            target: Some(target),
+            workspace,
+            ..Default::default()
+        });
+        if gap > 0 {
+            items.push(MobileItem {
+                lines: vec![Line::default(); usize::from(gap)],
+                background: palette.panel_bg,
+                ..Default::default()
+            });
+        }
+    }
+    items.push(MobileItem::action(
+        "  + new workspace",
+        ClientMobileTarget::NewWorkspace,
+        palette,
+    ));
+}
+
+/// With several machines, every machine's agents and then its spaces, two lines each.
+fn machine_list_items(
+    items: &mut Vec<MobileItem>,
+    snapshot: &ClientShellSnapshot,
+    endpoints: &[ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+    config: &ClientShellConfig,
+    selected_workspace_id: Option<&WorkspaceNavigationTarget>,
+    content_width: u16,
+) {
+    let palette = &config.palette;
     let agents = super::aggregate_navigation::aggregate_agent_rows(
         endpoints,
         active_endpoint_id,
@@ -632,6 +856,7 @@ fn mobile_items(
                 ))],
                 background: palette.panel_bg,
                 target: None,
+                ..Default::default()
             });
         }
         for row in agents {
@@ -743,6 +968,7 @@ fn mobile_items(
                     endpoint_id: endpoint.endpoint_id.clone(),
                     pane_id: agent.pane_id.clone(),
                 }),
+                ..Default::default()
             });
         }
     }
@@ -875,69 +1101,11 @@ fn mobile_items(
                     endpoint_id: endpoint.endpoint_id.clone(),
                     workspace_id: workspace.workspace_id.clone(),
                 }),
+                workspace: Some((endpoint.endpoint_id.clone(), workspace.workspace_id.clone())),
+                ..Default::default()
             });
         }
     }
-
-    if let Some(workspace_id) = snapshot.focused_workspace_id.as_deref() {
-        items.push(MobileItem::section("tabs", palette));
-        items.push(MobileItem::action(
-            "  + new tab",
-            ClientMobileTarget::NewTab,
-            palette,
-        ));
-        for (index, tab) in snapshot
-            .tabs
-            .iter()
-            .filter(|tab| tab.workspace_id == workspace_id)
-            .enumerate()
-        {
-            let background = if tab.focused {
-                palette.surface_dim
-            } else {
-                palette.panel_bg
-            };
-            let label = if tab.custom_label {
-                format!("{} · {}", index + 1, tab.label)
-            } else {
-                format!("tab {}", tab.label)
-            };
-            let label = format!(
-                "  {}",
-                crate::ui::truncate_end(&label, usize::from(content_width.saturating_sub(3)),)
-            );
-            items.push(MobileItem {
-                lines: vec![Line::from(Span::styled(
-                    label,
-                    Style::default()
-                        .fg(palette.text)
-                        .bg(background)
-                        .add_modifier(Modifier::BOLD),
-                ))],
-                background,
-                target: Some(ClientMobileTarget::Tab {
-                    endpoint_id: active_endpoint_id.clone(),
-                    tab_id: tab.tab_id.clone(),
-                }),
-            });
-        }
-    }
-
-    items.push(MobileItem::section("menu", palette));
-    for (index, (label, _)) in super::global_menu::global_menu_items(snapshot)
-        .into_iter()
-        .enumerate()
-    {
-        items.push(MobileItem {
-            lines: vec![Line::from(Span::styled(
-                format!("  {label}"),
-                Style::default().fg(palette.overlay1).bg(palette.panel_bg),
-            ))],
-            background: palette.panel_bg,
-            target: Some(ClientMobileTarget::Menu(index)),
-        });
-    }
-    items
 }
 
 impl ClientShellState {
@@ -1047,6 +1215,12 @@ impl ClientShellState {
                     self.mode = ClientShellMode::Terminal;
                     self.navigate_workspace_id = None;
                 }
+            }
+            Some(ClientMobileTarget::ToggleWorkspace(workspace_id)) => {
+                if !self.collapsed_workspaces.remove(&workspace_id) {
+                    self.collapsed_workspaces.insert(workspace_id);
+                }
+                self.persist_chrome_preferences(outcome);
             }
             Some(ClientMobileTarget::Tab {
                 endpoint_id,
